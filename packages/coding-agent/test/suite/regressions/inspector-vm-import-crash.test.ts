@@ -1,5 +1,7 @@
-import { spawnSync } from "node:child_process";
+import { type ChildProcessByStdio, spawn, spawnSync } from "node:child_process";
 import { close as closeInspector, url as inspectorUrl, open as openInspector } from "node:inspector";
+import { createServer } from "node:net";
+import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, describe, expect, test, vi } from "vitest";
 import { isRecoverableInspectorVmImportError } from "../../../src/inspector-policy.ts";
@@ -61,6 +63,81 @@ function createCrashContext(): UncaughtCrashThis {
 	};
 }
 
+function findFreePort(): Promise<number> {
+	return new Promise((resolve, reject) => {
+		const server = createServer();
+		server.once("error", reject);
+		server.listen(0, "127.0.0.1", () => {
+			const address = server.address();
+			if (address === null || typeof address === "string") {
+				server.close(() => reject(new Error("Expected a TCP server address")));
+				return;
+			}
+			server.close(() => resolve(address.port));
+		});
+	});
+}
+
+/**
+ * Attach a full-fidelity debugger client to every Inspector endpoint the run prints —
+ * enable the Debugger domain, resume the break-at-start pause, and stay connected until
+ * the CLI prints its help output — mirroring a developer who remains attached across the
+ * launcher-to-child handoff.
+ */
+function driveInspectorBrkRun(
+	child: ChildProcessByStdio<null, Readable, Readable>,
+	sockets: WebSocket[],
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+	return new Promise((resolve, reject) => {
+		let stdout = "";
+		let stderr = "";
+		const attached = new Set<string>();
+		const timer = setTimeout(() => {
+			reject(new Error(`--inspect-brk handoff timed out\nstdout:\n${stdout}\nstderr:\n${stderr}`));
+		}, 55_000);
+		timer.unref();
+		child.stdout.on("data", (chunk: Buffer) => {
+			stdout += chunk.toString();
+			if (stdout.includes("Usage:")) {
+				// The run is past both break-at-starts; detach so neither process is kept
+				// alive by its still-attached debugger client.
+				for (const socket of sockets) socket.close();
+			}
+		});
+		child.stderr.on("data", (chunk: Buffer) => {
+			stderr += chunk.toString();
+			for (const match of stderr.matchAll(/Debugger listening on (ws:\/\/\S+)/g)) {
+				const url = match[1];
+				if (url === undefined || attached.has(url)) continue;
+				attached.add(url);
+				const socket = new WebSocket(url);
+				sockets.push(socket);
+				socket.addEventListener("open", () => {
+					socket.send(JSON.stringify({ id: 1, method: "Debugger.enable" }));
+					socket.send(JSON.stringify({ id: 2, method: "Runtime.runIfWaitingForDebugger" }));
+				});
+				socket.addEventListener("message", (event) => {
+					const message = JSON.parse(String(event.data)) as { method?: string };
+					if (message.method === "Debugger.paused") {
+						socket.send(JSON.stringify({ id: 3, method: "Debugger.resume" }));
+					}
+				});
+				socket.addEventListener("error", () => {
+					// The endpoint disappears when its process exits first; that is fine.
+				});
+			}
+		});
+		child.on("error", (error) => {
+			clearTimeout(timer);
+			reject(error);
+		});
+		child.on("close", (code) => {
+			clearTimeout(timer);
+			resolve({ code, stdout, stderr });
+		});
+	});
+}
+
 afterEach(() => {
 	vi.restoreAllMocks();
 });
@@ -96,6 +173,46 @@ describe("Inspector VM dynamic import crash handling", () => {
 		expect(endpoints).toHaveLength(2);
 		expect(new Set(endpoints).size).toBe(1);
 	});
+
+	test("hands the fixed --inspect-brk endpoint to cli-main while a debugger stays attached", async () => {
+		// Review question this pins: node:inspector documents close() as "blocks until
+		// there are no active connections", which would hang the launcher handoff under
+		// --inspect-brk because a client must stay attached to resume the launcher at
+		// all. On the supported runtime (Node >= 24) close() force-disconnects instead,
+		// so the handoff completes and the child rebinds the same fixed endpoint.
+		const cliPath = fileURLToPath(new URL("../../../src/cli.ts", import.meta.url));
+		const port = await findFreePort();
+		const child = spawn(process.execPath, [`--inspect-brk=127.0.0.1:${port}`, "--import", "tsx", cliPath, "--help"], {
+			env: { ...process.env, PI_OFFLINE: "1" },
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		const sockets: WebSocket[] = [];
+
+		try {
+			const { code, stdout, stderr } = await driveInspectorBrkRun(child, sockets);
+			const endpoints = [...stderr.matchAll(/Debugger listening on ws:\/\/127\.0\.0\.1:(\d+)\//g)].map(
+				(match) => match[1],
+			);
+
+			expect(stdout).toContain("Usage:");
+			expect(code).toBe(0);
+			expect(stderr).not.toContain("address already in use");
+			// Launcher and child each announced a break-at-start endpoint on the same
+			// configured port: the launcher released it without blocking on the attached
+			// client and the child rebound it.
+			expect(endpoints).toHaveLength(2);
+			expect(new Set(endpoints)).toEqual(new Set([String(port)]));
+		} finally {
+			for (const socket of sockets) {
+				try {
+					socket.close();
+				} catch {
+					// Already closed.
+				}
+			}
+			if (child.exitCode === null) child.kill("SIGKILL");
+		}
+	}, 60_000);
 
 	test("keeps the interactive child running for the exact Inspector eval rejection", () => {
 		const context = createCrashContext();
