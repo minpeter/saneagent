@@ -262,16 +262,18 @@ describe("RPC auth and connection handler contracts", () => {
 		const harness = makeHarness(tempDir);
 		cleanup = harness.cleanup;
 		const handler = createRpcConnectionHandler(harness.runtimeHost, collected.sink);
+		// Non-secret fixture: must not use provider token prefixes (sk-, ghp_, ...).
+		const fixtureApiKey = "test-openai-key";
 
 		await handler.handleInputLine(
-			JSON.stringify({ id: "set-key", type: "login_api_key", provider: "openai", key: "sk-FAKEKEY-123" }),
+			JSON.stringify({ id: "set-key", type: "login_api_key", provider: "openai", key: fixtureApiKey }),
 		);
 		expect(await collected.waitFor((message) => message.id === "set-key")).toMatchObject({ success: true });
 		const stored = JSON.parse(readFileSync(harness.authPath, "utf-8")) as Record<
 			string,
 			{ type: string; key: string }
 		>;
-		expect(stored.openai).toMatchObject({ type: "api_key", key: "sk-FAKEKEY-123" });
+		expect(stored.openai).toMatchObject({ type: "api_key", key: fixtureApiKey });
 		expect(statSync(harness.authPath).mode & 0o777).toBe(0o600);
 
 		await handler.handleInputLine(JSON.stringify({ id: "logout", type: "logout", provider: "openai" }));
