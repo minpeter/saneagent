@@ -56,6 +56,7 @@ import { allowSummarizationRetry, DEFAULT_SUMMARIZATION_RETRY_POLICY } from "./s
 import { normalizeSummarizationTurnOrder } from "./summarization-turn-order.ts";
 import { extractTaskIntent, resolveInheritedTaskIntent } from "./task-intent.ts";
 import * as truncation from "./tool-truncation.ts";
+import { previousWarmSummaryMessages, type WarmSummaryRegeneration } from "./warm-summary-regeneration.ts";
 import { computeStructuralYield } from "./yield.ts";
 
 const DEFAULT_CONTEXT_WINDOW = 200_000;
@@ -92,7 +93,7 @@ export interface SpeculativeCompactionContext {
 	): Promise<ApplyCompactionResult>;
 }
 
-export interface SpeculativeCompactionSnapshot {
+export interface SpeculativeCompactionSnapshot extends WarmSummaryRegeneration {
 	generation: number;
 	expectedRevision: number;
 	model: Model<any>;
@@ -281,6 +282,7 @@ async function generateSummaryMessage(options: {
 	try {
 		const requestMessages: AgentMessage[] = [
 			...options.messages,
+			...previousWarmSummaryMessages(options.snapshot.previousWarmSummary),
 			{
 				role: "user",
 				content: [{ type: "text", text: options.prompt.user }],
@@ -417,7 +419,7 @@ export function getPromptVariant(options: {
 
 export function createSpeculativeCompactionSnapshot(
 	context: SpeculativeCompactionContext,
-	options: {
+	options: WarmSummaryRegeneration & {
 		customInstructions?: string;
 		generation: number;
 		origin?: "speculative" | "blocking" | "core-route";
@@ -439,17 +441,14 @@ export function createSpeculativeCompactionSnapshot(
 	if (!preparation) return undefined;
 
 	return {
-		generation: options.generation,
+		...options,
 		expectedRevision,
 		model,
 		contextWindow,
 		preparation,
 		branchEntries,
 		promptVariant: getPromptVariant({ reason: "extension", preparation }),
-		...(options.origin ? { origin: options.origin } : {}),
-		customInstructions: options.customInstructions,
 		systemPrompt: context.getSystemPrompt?.(),
-		tools: options.tools,
 	};
 }
 
