@@ -112,7 +112,12 @@ function createContext(contextWindow: number, maxTokens = contextWindow, compact
 		hasPendingMessages: () => false,
 		shutdown: vi.fn(),
 		getContextUsage: () => ({ tokens: contextWindow + 1, contextWindow, percent: 1.01 }),
-		getCompactionSettings: () => ({ enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 }),
+		getCompactionSettings: () => ({
+			enabled: true,
+			reserveTokens: 16_384,
+			keepRecentTokens: 20_000,
+			toolAdmissionEnabled: false,
+		}),
 		getLookAtSettings: () => ({ enabled: true, models: undefined }),
 		getImageSettings: () => ({ autoResize: true, blockImages: false }),
 		sessionSettings: createInMemoryExtensionSessionSettings(),

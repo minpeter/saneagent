@@ -3,7 +3,6 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Tool } from "@earendil-works/pi-ai";
 import type { CompactionResult } from "../../../compaction/index.ts";
 import { createWarmAnchorSnapshot, isWarmSummaryAnchorValid } from "../../../compaction/warm-anchor.ts";
-import { convertToLlm } from "../../../messages.ts";
 import type {
 	ContextUsage,
 	ExtensionAPI,
@@ -13,11 +12,7 @@ import type {
 } from "../../types.ts";
 import * as checkpointState from "./checkpoint-state.ts";
 import * as breaker from "./circuit-breaker.ts";
-import {
-	BUILTIN_CONTEXT_REDUCTION_OPTIONS,
-	reduceContextMessages,
-	shouldApplyContextReduction,
-} from "./context-reduction.ts";
+import { buildCompactionContext } from "./context-pipeline.ts";
 import {
 	createDegradationMonitorState,
 	handleMessageEnd,
@@ -38,8 +33,8 @@ import {
 	SDK_NATIVE_LANE_REJECTION_REASON,
 } from "./lane-policy.ts";
 import { type CompactionLogger, createCompactionLogger } from "./log.ts";
+import { handleCompactionModelSelect } from "./model-selection.ts";
 import {
-	markOpenAiRemoteReplayBoundary,
 	type OpenAiRemoteCompactionDependencies,
 	rewriteOpenAiPayloadWithRemoteCompaction,
 	runOpenAiRemoteCompaction,
@@ -50,24 +45,34 @@ import {
 	isOpenAiRemoteCompactionModel,
 	openAiRemoteCompactionOrigin,
 } from "./openai-remote-model.ts";
+import {
+	resolveBeforeAgentStartMessage,
+	resolveCompactionGeometry,
+	resolveIdleWarmAction,
+	shouldDeferGraceBand,
+} from "./orchestration.ts";
 import * as cap from "./per-turn-cap.ts";
 import * as policy from "./policy.ts";
-import { repairOrphanedToolResults } from "./repair-tool-pairs.ts";
 import * as restoration from "./restoration-tracker.ts";
 import {
 	applyGeneratedCompaction,
 	createEmergencyPruneLatch,
 	createSpeculativeCompactionSnapshot,
 	getPromptVariant,
-	hardLimitEmergencyPrune,
 	runExtensionCompaction,
 	type SpeculativeCompactionResult,
 	type SpeculativeCompactionSnapshot,
 	SummaryGenerationError,
 } from "./speculative.ts";
+import { type SpeculativeJob, trackSpeculativeJob } from "./speculative-job.ts";
 import { type CompactionExtensionState, createInitialState, resetTurnCounter } from "./state.ts";
 import { resolveInheritedTaskIntent } from "./task-intent.ts";
 import * as todoBridge from "./todo-bridge.ts";
+import {
+	computeTokenBudgetReminder,
+	createInitialReminderState,
+	type TokenBudgetReminderState,
+} from "./token-budget-reminder.ts";
 import { isTransientSummarizationFailure } from "./transient-failure.ts";
 import { isIneffectiveCompaction } from "./yield.ts";
 
@@ -197,15 +202,8 @@ export default function compactionExtension(
 	const restorationState = state.restoration ?? restoration.createRestorationTrackerState();
 	state = { ...state, restoration: restorationState };
 	let speculativeGeneration = 0;
-	let speculativeJob:
-		| {
-				generation: number;
-				snapshot: SpeculativeCompactionSnapshot;
-				controller: AbortController;
-				promise: Promise<CompactionResult | undefined>;
-				failure: Promise<Error | undefined>;
-		  }
-		| undefined;
+	let reminderState: TokenBudgetReminderState = createInitialReminderState();
+	let speculativeJob: SpeculativeJob | undefined;
 	const pendingMetadata = new Map<string, PendingCompactionMetadata>();
 	let logger: CompactionLogger | undefined;
 	const getLogger = (ctx: ExtensionContext): CompactionLogger => (logger ??= createCompactionLogger(ctx.agentDir));
@@ -431,9 +429,14 @@ export default function compactionExtension(
 			(result) => ({ result, error: undefined }),
 			(error: unknown) => ({ result: undefined, error: error instanceof Error ? error : new Error(String(error)) }),
 		);
-		const promise = settled.then(({ result }) => result);
-		const failure = settled.then(({ error }) => error);
-		speculativeJob = { generation, snapshot, controller, promise, failure };
+		speculativeJob = trackSpeculativeJob({
+			generation,
+			snapshot,
+			controller,
+			settled,
+			armedAtTokens: ctx.getContextUsage()?.tokens ?? 0,
+		});
+		void settled.then(() => remoteCompactionDependencies.onSpeculativeJobSettled?.());
 	}
 
 	function capturePendingMetadata(requestId: string, ctx: ExtensionContext): void {
@@ -776,35 +779,18 @@ export default function compactionExtension(
 		}
 	});
 
-	pi.on("model_select", (event, ctx) => {
-		if (lanePolicy.disablesSenpiCompaction(ctx)) {
-			invalidateSpeculativeCompaction(ctx);
-			return;
-		}
-		const jobModel = speculativeJob?.snapshot.model;
-		const selectedModel = ctx.model;
-		const alreadySpeculatingForSelectedModel =
-			jobModel !== undefined &&
-			selectedModel !== undefined &&
-			jobModel.api === selectedModel.api &&
-			jobModel.provider === selectedModel.provider &&
-			jobModel.id === selectedModel.id &&
-			jobModel.baseUrl === selectedModel.baseUrl &&
-			jobModel.contextWindow === selectedModel.contextWindow;
-		if (!alreadySpeculatingForSelectedModel) {
-			invalidateSpeculativeCompaction(ctx);
-		}
-		const previousWindow = event.previousModel?.contextWindow ?? 0;
-		const contextWindow = ctx.model?.contextWindow ?? 0;
-		if (previousWindow <= contextWindow) return;
-		const usage = ctx.getContextUsage();
-		if (!usage) return;
-		if (breaker.isTripped(state, Date.now())) return;
-		const settings = ctx.getCompactionSettings();
-		if (policy.shouldStartSpeculativeCompaction(usage, contextWindow, settings, state.lastYield ?? undefined)) {
-			startSpeculativeCompaction(ctx, PROACTIVE_COMPACTION_INSTRUCTIONS);
-		}
-	});
+	pi.on("model_select", (event, ctx) =>
+		handleCompactionModelSelect({
+			event,
+			ctx,
+			state,
+			speculativeSnapshot: speculativeJob?.snapshot,
+			laneOwnsCompaction: lanePolicy.disablesSenpiCompaction(ctx),
+			breakerTripped: breaker.isTripped(state, Date.now()),
+			invalidate: () => invalidateSpeculativeCompaction(ctx),
+			start: () => startSpeculativeCompaction(ctx, PROACTIVE_COMPACTION_INSTRUCTIONS),
+		}),
+	);
 
 	pi.on("session_compact", async (event: SessionCompactEvent, ctx) => {
 		const compactEvent = event;
@@ -818,6 +804,7 @@ export default function compactionExtension(
 			const keptEntries = firstKeptIndex === -1 ? [] : branchEntries.slice(firstKeptIndex);
 			state = cap.incrementAccepted(state);
 			state = breaker.recordSuccess(state);
+			reminderState = createInitialReminderState();
 			const details = compactEvent.compactionEntry.details as
 				| { structuralYield?: { savedTokens: number; savingsRatio: number } }
 				| undefined;
@@ -853,7 +840,13 @@ export default function compactionExtension(
 					compactionEntryId: compactEvent.compactionEntry.id,
 					contextWindow: usage?.contextWindow ?? ctx.model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
 					usageTokens: usage?.tokens ?? null,
-					reserveTokens: settings.reserveTokens,
+					reserveTokens:
+						settings.reserveScalingEnabled === false
+							? settings.reserveTokens
+							: policy.resolveReserveTokens(
+									usage?.contextWindow ?? ctx.model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+									settings.reserveTokens,
+								),
 					settings,
 					keptMessages: keptEntries.flatMap((entry) => {
 						if (entry.type !== "message") return [];
@@ -884,10 +877,15 @@ export default function compactionExtension(
 		// the circuit breaker never blocks that valve for senpi-owned lanes.
 		const laneOwnsCompaction = lanePolicy.disablesSenpiCompaction(ctx);
 		const breakerCoolingDown = breaker.isTripped(state, Date.now()) || laneOwnsCompaction;
+		const { reserveTokens, thresholdTokens, leadTokens } = resolveCompactionGeometry({
+			contextWindow,
+			settings,
+			lastYield: state.lastYield ?? undefined,
+		});
 		if (
 			!laneOwnsCompaction &&
 			usage &&
-			policy.isAtHardLimit(usage, contextWindow, settings.reserveTokens, pendingPromptTokens)
+			policy.isAtHardLimit(usage, contextWindow, reserveTokens, pendingPromptTokens)
 		) {
 			getLogger(ctx).debug("hard_limit_trigger", {
 				contextWindow,
@@ -905,7 +903,24 @@ export default function compactionExtension(
 				tokens: usageWithPendingPrompt.tokens ?? 0,
 				threshold: settings.reserveTokens,
 			});
-			await applyBlockingCompaction(ctx, PROACTIVE_COMPACTION_INSTRUCTIONS);
+			if (
+				!shouldDeferGraceBand({
+					tokens: usageWithPendingPrompt.tokens ?? 0,
+					thresholdTokens,
+					leadTokens,
+					contextWindow,
+					reserveTokens,
+					compactionInFlight: speculativeJob !== undefined && !speculativeJob.completed,
+					graceBandEnabled: settings.graceBandEnabled,
+				})
+			) {
+				await applyBlockingCompaction(ctx, PROACTIVE_COMPACTION_INSTRUCTIONS);
+			} else {
+				getLogger(ctx).debug("grace_deferred", {
+					tokens: usageWithPendingPrompt.tokens ?? 0,
+					threshold: thresholdTokens,
+				});
+			}
 		} else if (
 			!breakerCoolingDown &&
 			usageWithPendingPrompt &&
@@ -914,6 +929,7 @@ export default function compactionExtension(
 				contextWindow,
 				settings,
 				state.lastYield ?? undefined,
+				leadTokens,
 			)
 		) {
 			getLogger(ctx).debug("emergency_prune", {
@@ -923,33 +939,45 @@ export default function compactionExtension(
 			startSpeculativeCompaction(ctx, PROACTIVE_COMPACTION_INSTRUCTIONS);
 		}
 
-		return message ? { message } : undefined;
+		const reminder = computeTokenBudgetReminder({
+			contextTokens: usageWithPendingPrompt?.tokens ?? 0,
+			contextWindow,
+			thresholdTokens,
+			leadTokens,
+			compactionGeneration: speculativeGeneration,
+			state: reminderState,
+		});
+		reminderState = reminder.nextState;
+		const deliveredMessage = resolveBeforeAgentStartMessage({
+			message,
+			reminder: reminder.message,
+			reminderEnabled: settings.reminderEnabled,
+		});
+		return deliveredMessage ? { message: deliveredMessage } : undefined;
 	});
 
 	pi.on("context", (event, ctx) => {
 		const usage = ctx.getContextUsage();
+		const settings = ctx.getCompactionSettings();
 		const contextWindow = usage?.contextWindow ?? ctx.model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
-		const promptContextWindow = getPromptContextWindow(contextWindow, ctx.model?.maxTokens);
-		const sourceMessages = shouldApplyContextReduction({
-			usageTokens: usage?.tokens ?? null,
-			contextWindow,
-			isProviderNativeCompactionPath:
-				isOpenAiRemoteCompactionModel(ctx.model) || lanePolicy.disablesSenpiCompaction(ctx),
-		})
-			? reduceContextMessages(event.messages, BUILTIN_CONTEXT_REDUCTION_OPTIONS).messages
-			: event.messages;
-		// The claude-sdk-oauth lane stands down from senpi compaction entirely:
-		// destructively pruning the provider context near the hard limit would
-		// break the resident SDK session's continuity the same way the gated
-		// reduction lane would.
-		const emergency = lanePolicy.disablesSenpiCompaction(ctx)
-			? { messages: sourceMessages, needsAggressiveCompaction: false }
-			: hardLimitEmergencyPrune(sourceMessages, promptContextWindow, emergencyPruneLatch);
-		const marked = markOpenAiRemoteReplayBoundary(emergency.messages, {
-			model: ctx.model,
-			branchEntries: ctx.sessionManager.getBranch(),
-		});
-		return { messages: repairOrphanedToolResults(convertToLlm(marked)) };
+		const breakerFallback =
+			breaker.isTripped(state, Date.now()) &&
+			usage?.tokens !== null &&
+			usage !== undefined &&
+			usage.tokens >= contextWindow * policy.computeEffectiveThreshold(contextWindow, state.lastYield ?? undefined);
+		if (breakerFallback)
+			getLogger(ctx).debug("breaker_deterministic_fallback", { route: "context-event", tokens: usage.tokens ?? 0 });
+		return {
+			messages: buildCompactionContext({
+				event,
+				ctx,
+				contextWindow,
+				toolAdmissionEnabled: settings.toolAdmissionEnabled !== false,
+				breakerFallback,
+				laneOwnsCompaction: lanePolicy.disablesSenpiCompaction(ctx),
+				emergencyPruneLatch,
+			}),
+		};
 	});
 
 	pi.on("before_provider_request", async (event, ctx) => {
@@ -1016,6 +1044,22 @@ export default function compactionExtension(
 			startSpeculativeCompaction(ctx, idle.IDLE_COMPACTION_INSTRUCTIONS);
 			armIdleWarmupRetry(ctx);
 			armIdleApply(ctx);
+		} else {
+			const warmAction = resolveIdleWarmAction(
+				{
+					willRetry: event.willRetry ?? false,
+					aborted: event.aborted === true,
+					settings,
+					usage,
+					contextWindow,
+					breakerTripped: breaker.isTripped(state, Date.now()),
+					lastYield: state.lastYield ?? undefined,
+					mode: ctx.mode,
+				},
+				speculativeJob,
+			);
+			if (warmAction === "replace") invalidateSpeculativeCompaction(ctx);
+			if (warmAction !== "none") startSpeculativeCompaction(ctx, idle.IDLE_COMPACTION_INSTRUCTIONS);
 		}
 	});
 

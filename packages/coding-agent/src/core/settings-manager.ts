@@ -17,6 +17,8 @@ import { findNearestParentConfigDir } from "../nearest-parent-config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
 import { envValue } from "./brand.ts";
+import type { IdealCompactionSettings } from "./compaction/ideal-compaction-settings.ts";
+import { type ResolvedCompactionSettings, resolveCompactionSettings } from "./compaction-settings-resolver.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
 import { FILE_STORAGE_LOCK_OPTIONS } from "./lockfile-policy.ts";
 import type { RetryPolicyOverride } from "./retry-fallback/profile-override.ts";
@@ -38,7 +40,7 @@ export type {
 export const DEFAULT_STREAM_START_TIMEOUT_MS = 90_000;
 export const DEFAULT_PROVIDER_STREAM_RETRY_TIMEOUT_MS = 30_000;
 
-export interface CompactionSettings {
+export interface CompactionSettings extends IdealCompactionSettings {
 	enabled?: boolean; // default: true
 	reserveTokens?: number; // default: 16384
 	keepRecentTokens?: number; // default: 20000
@@ -1302,34 +1304,8 @@ export class SettingsManager {
 		return this.settings.compaction?.keepRecentTokens ?? 20000;
 	}
 
-	getCompactionSettings(): {
-		enabled: boolean;
-		reserveTokens: number;
-		keepRecentTokens: number;
-		speculativeEnabled: boolean;
-		speculativeFraction: number;
-		speculativeCooldownMs: number;
-		restorationEnabled: boolean;
-		restorationMaxItems: number;
-		restorationMaxTokensPerItem: number;
-		restorationMaxTotalTokens: number;
-		restorationContextRatio: number;
-		idleCompactionEnabled: boolean;
-	} {
-		return {
-			enabled: this.getCompactionEnabled(),
-			reserveTokens: this.getCompactionReserveTokens(),
-			keepRecentTokens: this.getCompactionKeepRecentTokens(),
-			speculativeEnabled: this.settings.compaction?.speculativeEnabled ?? true,
-			speculativeFraction: this.settings.compaction?.speculativeFraction ?? 0.75,
-			speculativeCooldownMs: this.settings.compaction?.speculativeCooldownMs ?? 30000,
-			restorationEnabled: this.settings.compaction?.restorationEnabled ?? true,
-			restorationMaxItems: this.settings.compaction?.restorationMaxItems ?? 10,
-			restorationMaxTokensPerItem: this.settings.compaction?.restorationMaxTokensPerItem ?? 5000,
-			restorationMaxTotalTokens: this.settings.compaction?.restorationMaxTotalTokens ?? 50_000,
-			restorationContextRatio: this.settings.compaction?.restorationContextRatio ?? 0.15,
-			idleCompactionEnabled: this.settings.compaction?.idleCompactionEnabled ?? true,
-		};
+	getCompactionSettings(): ResolvedCompactionSettings {
+		return resolveCompactionSettings(this.settings.compaction);
 	}
 
 	getBranchSummarySettings(): { reserveTokens: number; skipPrompt: boolean } {

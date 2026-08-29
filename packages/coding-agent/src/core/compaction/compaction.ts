@@ -25,6 +25,10 @@ import {
 	type SessionEntry,
 	sessionEntryToContextMessages,
 } from "../session-manager.ts";
+import type { CompactionSettings } from "./compaction-settings.ts";
+
+export { type CompactionSettings, DEFAULT_COMPACTION_SETTINGS } from "./compaction-settings.ts";
+
 import {
 	consumeStreamWithIdleTimeout,
 	DEFAULT_SUMMARIZATION_IDLE_TIMEOUT_MS,
@@ -187,21 +191,6 @@ function combineUsage(first: Usage, second: Usage): Usage {
 // Types
 // ============================================================================
 
-export interface CompactionSettings {
-	enabled: boolean;
-	reserveTokens: number;
-	keepRecentTokens: number;
-	speculativeEnabled?: boolean;
-	speculativeFraction?: number;
-	speculativeCooldownMs?: number;
-	restorationEnabled?: boolean;
-	restorationMaxItems?: number;
-	restorationMaxTokensPerItem?: number;
-	restorationMaxTotalTokens?: number;
-	restorationContextRatio?: number;
-	idleCompactionEnabled?: boolean;
-}
-
 /** Active provider contexts and request settings used to preserve cacheable compaction prefixes. */
 export interface CacheFriendlySummaryOptions {
 	/** Exact provider context prefix containing the history to summarize. */
@@ -214,21 +203,6 @@ export interface CacheFriendlySummaryOptions {
 		"sessionId" | "onPayload" | "onResponse" | "transport" | "thinkingBudgets" | "maxRetryDelayMs"
 	>;
 }
-
-export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
-	enabled: true,
-	reserveTokens: 16384,
-	keepRecentTokens: 20000,
-	speculativeEnabled: true,
-	speculativeFraction: 0.75,
-	speculativeCooldownMs: 30000,
-	restorationEnabled: true,
-	restorationMaxItems: 10,
-	restorationMaxTokensPerItem: 5000,
-	restorationMaxTotalTokens: 50_000,
-	restorationContextRatio: 0.15,
-	idleCompactionEnabled: true,
-};
 
 // ============================================================================
 // Token calculation

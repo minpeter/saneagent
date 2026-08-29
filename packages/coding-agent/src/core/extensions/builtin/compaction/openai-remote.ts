@@ -102,6 +102,7 @@ export type OpenAiRemoteCompactionDependencies = {
 	now?: () => number;
 	remoteTimeoutMs?: number;
 	streamRunner?: OpenAiResponsesStreamRunner;
+	onSpeculativeJobSettled?: () => void;
 };
 
 type OpenAiRemoteCompactionContext = {
