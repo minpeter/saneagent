@@ -48,32 +48,13 @@ import type {
 } from "./settings-shapes.ts";
 import type { BranchSummarySettings, TerminalSettings } from "./terminal-settings.ts";
 
-export type {
-	ProviderRetrySettings,
-	RetrySettings,
-} from "./retry-fallback/settings.ts";
+export type * from "./settings-public-types.ts";
 
 export const DEFAULT_STREAM_START_TIMEOUT_MS = 90_000;
 export const DEFAULT_PROVIDER_STREAM_RETRY_TIMEOUT_MS = 30_000;
 
-export type { CompactionSettings } from "./compaction-settings-access.ts";
-
-export type { BranchSummarySettings } from "./terminal-settings.ts";
-
 export type TuiMode = RendererTuiMode;
 export type FullscreenExitOutput = "transcript" | "resume-hint";
-
-export type {
-	ImageSettings,
-	LookAtSettings,
-	MarkdownSettings,
-	MermaidRenderingMode,
-	OpenAISettings,
-	PromptCacheKeepAliveSettings,
-	PromptCacheSettings,
-	ThinkingBudgetsSettings,
-} from "./settings-shapes.ts";
-export type { TerminalSettings } from "./terminal-settings.ts";
 
 /** Service tier remembered per model; "auto" is an explicit opt-out of an inherited priority tier. */
 export type ModelServiceTier = "auto" | "flex" | "priority";
