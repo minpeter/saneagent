@@ -1,4 +1,4 @@
-import type { CompactionSettings } from "./settings-manager.ts";
+import type { CompactionSettings } from "./compaction-settings-access.ts";
 
 export interface ResolvedCompactionSettings {
 	enabled: boolean;
