@@ -6,8 +6,32 @@
 
 ### Added
 
+- Oversized tool results are now capped before they enter the context. A single result is limited to
+  `min(50000, max(8192, 5% of the context window))`; the full output is written to a spill file and
+  the kept excerpt carries a marker naming that path, so the model can read it back on demand.
+  Disable with `compaction.toolAdmissionEnabled: false`.
+- A context-budget reminder is delivered once per compaction generation as the remaining runway
+  approaches the threshold, so the model can wrap up verbose exploration before the summary is
+  taken. Disable with `compaction.reminderEnabled: false`.
+- A grace band defers blocking compaction while a speculative summary is still generating, up to
+  `min(threshold + lead, window - reserve)`. Past that cap it blocks as before. Disable with
+  `compaction.graceBandEnabled: false`.
+
 ### Changed
 
+- Speculative summarization now starts on an absolute lead of `clamp(threshold * 0.125, 8192, 32768)`
+  tokens instead of a multiplicative fraction of the threshold, so a warm summary is generated close
+  enough to the threshold to still be valid when it is needed. Idle warm generation may also begin at
+  50% fill; the idle apply gates are unchanged. Override the lead with
+  `compaction.speculativeLeadTokens` (clamped to the same range).
+- The compaction threshold table gains large-window tiers: 0.70 above 128K and 0.80 above 512K, with
+  the clamp widened to `[0.40, 0.85]`. Low-yield feedback can no longer raise a ratio above its tier
+  base.
+- The hard-limit reserve now scales with the context window as
+  `max(configured, min(4% of window, 49152))`, moving the emergency valve off 98.4% on million-token
+  windows. Disable with `compaction.reserveScalingEnabled: false`.
+- While the compaction circuit breaker is cooling down and the context is over the threshold, the
+  deterministic no-LLM context reduction now runs immediately instead of waiting out the cooldown.
 - `grep` is temporarily withheld from the model-facing tool surface. It no longer appears in the
   system prompt or the active tool names, so the model can neither see nor call it. The tool is
   still built and stays resolvable by name for programmatic callers such as the Cursor exec bridge,

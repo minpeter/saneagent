@@ -52,10 +52,12 @@ export function resolveBeforeAgentStartMessage(input: {
 	reminderEnabled?: boolean;
 }): BeforeAgentStartEventResult["message"] | undefined {
 	if (!input.reminder || input.reminderEnabled === false) return input.message;
-	if (input.message) {
-		return { ...input.message, content: `${input.message.content}\n\n${input.reminder}` };
-	}
-	return { customType: "compaction-reminder", content: input.reminder, display: false };
+	// The reminder only ever rides along on a message the turn was already going to
+	// deliver. Returning one from an otherwise empty handler manufactures turn-local
+	// context, which suppresses the retry controller's model-fallback dispatch
+	// (regressions/compaction-current-model-state).
+	if (!input.message) return undefined;
+	return { ...input.message, content: `${input.message.content}\n\n${input.reminder}` };
 }
 
 export function resolveIdleWarmAction(

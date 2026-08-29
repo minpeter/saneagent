@@ -15,6 +15,11 @@ export function buildCompactionContext(input: {
 	event: ContextEvent;
 	ctx: ExtensionContext;
 	contextWindow: number;
+	/**
+	 * Context window minus the model's output reserve. The emergency prune budgets against the
+	 * space a request can actually occupy, so it must not see the full window.
+	 */
+	promptContextWindow: number;
 	toolAdmissionEnabled: boolean;
 	breakerFallback: boolean;
 	laneOwnsCompaction: boolean;
@@ -36,7 +41,7 @@ export function buildCompactionContext(input: {
 			: admittedMessages;
 	const emergency = input.laneOwnsCompaction
 		? { messages: sourceMessages, needsAggressiveCompaction: false }
-		: hardLimitEmergencyPrune(sourceMessages, input.contextWindow, input.emergencyPruneLatch);
+		: hardLimitEmergencyPrune(sourceMessages, input.promptContextWindow, input.emergencyPruneLatch);
 	const marked = markOpenAiRemoteReplayBoundary(emergency.messages, {
 		model: input.ctx.model,
 		branchEntries: input.ctx.sessionManager.getBranch(),

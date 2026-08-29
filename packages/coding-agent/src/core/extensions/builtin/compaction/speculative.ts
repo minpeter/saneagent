@@ -42,7 +42,6 @@ import { generateSummaryMessage, getSummaryText, isAssistantMessage } from "./sp
 import { allowSummarizationRetry, DEFAULT_SUMMARIZATION_RETRY_POLICY } from "./summarization-retry.ts";
 
 import { extractTaskIntent, resolveInheritedTaskIntent } from "./task-intent.ts";
-import type { WarmSummaryRegeneration } from "./warm-summary-regeneration.ts";
 
 export {
 	createEmergencyPruneLatch,
@@ -85,7 +84,7 @@ export interface SpeculativeCompactionContext {
 	): Promise<ApplyCompactionResult>;
 }
 
-export interface SpeculativeCompactionSnapshot extends WarmSummaryRegeneration {
+export interface SpeculativeCompactionSnapshot {
 	generation: number;
 	expectedRevision: number;
 	model: Model<any>;
@@ -191,7 +190,7 @@ export function getPromptVariant(options: {
 
 export function createSpeculativeCompactionSnapshot(
 	context: SpeculativeCompactionContext,
-	options: WarmSummaryRegeneration & {
+	options: {
 		customInstructions?: string;
 		generation: number;
 		origin?: "speculative" | "blocking" | "core-route";

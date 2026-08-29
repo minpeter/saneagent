@@ -1,5 +1,30 @@
 # changes
 
+## Compaction settings resolution moved out of the settings manager (2026-08-29)
+
+### What changed
+
+- `settings-manager.ts` delegates compaction knob resolution to `compaction-settings-resolver.ts`
+  instead of resolving every field inline. The manager keeps its public accessor shape; the resolver
+  owns the defaults for the ideal-pipeline knobs (grace band, tool admission, reminder, reserve
+  scaling, speculative lead).
+
+### Why
+
+- `settings-manager.ts` was already well past the module size ceiling. This branch adds compaction
+  knobs, and the project rule forbids growing an already-oversized file, so the added resolution
+  became its own module.
+
+### Why an extension could not handle it
+
+- These defaults are read by core admission before any extension runs, so they cannot be supplied
+  from extension space.
+
+### Expected merge conflict zones
+
+- Upstream changes to `getCompactionSettings` now touch `compaction-settings-resolver.ts` as well as
+  `settings-manager.ts`.
+
 ## 2026-08-29 - Withheld tools are filtered at the advertisement seam
 
 ### What changed

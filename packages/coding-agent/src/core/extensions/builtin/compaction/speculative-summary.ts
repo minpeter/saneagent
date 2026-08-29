@@ -21,7 +21,6 @@ import type { buildPrompt } from "./prompts.ts";
 import { repairOrphanedToolResults } from "./repair-tool-pairs.ts";
 import type { SpeculativeCompactionContext, SpeculativeCompactionSnapshot } from "./speculative.ts";
 import { normalizeSummarizationTurnOrder } from "./summarization-turn-order.ts";
-import { previousWarmSummaryMessages } from "./warm-summary-regeneration.ts";
 
 const SUMMARY_TOKEN_HEADROOM = 32_768;
 const SUMMARY_CONTEXT_WINDOW_RESERVE_RATIO = 0.5;
@@ -123,7 +122,6 @@ export async function generateSummaryMessage(options: {
 	try {
 		const requestMessages: AgentMessage[] = [
 			...options.messages,
-			...previousWarmSummaryMessages(options.snapshot.previousWarmSummary),
 			{
 				role: "user",
 				content: [{ type: "text", text: options.prompt.user }],

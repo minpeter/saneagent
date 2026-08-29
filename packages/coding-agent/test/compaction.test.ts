@@ -1064,11 +1064,7 @@ describe("builtin compaction extension threshold regressions", () => {
 				contextWindow: 200_000,
 				percent: 0.95,
 			}),
-			getCompactionSettings: () => ({
-				...DEFAULT_COMPACTION_SETTINGS,
-				keepRecentTokens: 1,
-				reserveTokens: 100,
-			}),
+			getCompactionSettings: () => ({ ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1, reserveTokens: 100 }),
 		});
 
 		// when
@@ -1186,11 +1182,7 @@ describe("builtin compaction extension threshold regressions", () => {
 				contextWindow: 200_000,
 				percent: 0.95,
 			}),
-			getCompactionSettings: () => ({
-				...DEFAULT_COMPACTION_SETTINGS,
-				keepRecentTokens: 1,
-				reserveTokens: 100,
-			}),
+			getCompactionSettings: () => ({ ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1, reserveTokens: 100 }),
 		});
 
 		// when
