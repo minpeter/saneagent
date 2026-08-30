@@ -157,7 +157,15 @@ describe("Regression: compaction state during model fallback", () => {
 					{ id: "large", contextWindow: 1_000, maxTokens: 64 },
 					{ id: "small", contextWindow: 100, maxTokens: 64 },
 				],
-				settings: { compaction: { enabled: true, reserveTokens: 0, keepRecentTokens: 0 } },
+				settings: {
+					compaction: {
+						enabled: true,
+						reserveTokens: 0,
+						keepRecentTokens: 0,
+						speculativeEnabled: false,
+					},
+					retry: { fallbackChains: { "*": [] } },
+				},
 				extensionFactories: [
 					(pi) => {
 						pi.on("session_before_compact", (event) => {
@@ -191,7 +199,26 @@ describe("Regression: compaction state during model fallback", () => {
 								display: false,
 							});
 							if (!smallerModel) throw new Error("Expected smaller model");
-							switchedToSmallerModel = await pi.setModel(smallerModel);
+							const switchActiveModel = Reflect.get(harness.session, "_switchActiveModel") as (
+								model: typeof smallerModel,
+								options: {
+									persistDefault: boolean;
+									appendSessionEntry: boolean;
+									entryReason: "fallback";
+									emitModelSelect: boolean;
+									modelSelectSource: "fallback";
+									invalidateCompaction: boolean;
+								},
+							) => Promise<unknown>;
+							await switchActiveModel.call(harness.session, smallerModel, {
+								persistDefault: false,
+								appendSessionEntry: true,
+								entryReason: "fallback",
+								emitModelSelect: true,
+								modelSelectSource: "fallback",
+								invalidateCompaction: true,
+							});
+							switchedToSmallerModel = true;
 						});
 					},
 				],
