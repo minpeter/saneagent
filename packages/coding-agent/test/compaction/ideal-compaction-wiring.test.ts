@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	admitContextToolResult,
+	admitContextToolResults,
 	resolveBeforeAgentStartMessage,
 	resolveCompactionGeometry,
 	shouldDeferGraceBand,
@@ -77,5 +78,42 @@ describe("ideal compaction extension wiring decisions", () => {
 
 		expect(result.admitted).toBe(true);
 		expect(result.text).not.toBe(marked);
+	});
+
+	it("preserves mixed tool-result blocks in order while projecting only oversized text", () => {
+		// Given: images surround one oversized text block in a mixed tool result.
+		const firstImage = { type: "image" as const, mimeType: "image/png", data: "FIRST" };
+		const secondImage = { type: "image" as const, mimeType: "image/jpeg", data: "SECOND" };
+		const oversizedText = `head\n${"x".repeat(100_000)}\ntail`;
+		const messages = [
+			{
+				role: "toolResult" as const,
+				toolCallId: "mixed-result",
+				toolName: "read",
+				content: [
+					{ type: "text" as const, text: "before" },
+					firstImage,
+					{ type: "text" as const, text: oversizedText },
+					secondImage,
+					{ type: "text" as const, text: "after" },
+				],
+				isError: false,
+				timestamp: 1,
+			},
+		];
+
+		// When: tool-result admission projects the context.
+		const [result] = admitContextToolResults(messages, 100_000, true);
+
+		// Then: only the oversized text changes; every surrounding block keeps its position.
+		expect(result?.role).toBe("toolResult");
+		if (result?.role !== "toolResult") throw new Error("Expected admitted tool result");
+		expect(result.content).toEqual([
+			{ type: "text", text: "before" },
+			firstImage,
+			expect.objectContaining({ type: "text", text: expect.stringContaining(TOOL_ADMISSION_MARKER_PREFIX) }),
+			secondImage,
+			{ type: "text", text: "after" },
+		]);
 	});
 });

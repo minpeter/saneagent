@@ -78,15 +78,19 @@ export function admitContextToolResults(
 	if (!enabled) return messages;
 	return messages.map((message) => {
 		if (message.role !== "toolResult") return message;
-		const text =
-			typeof message.content === "string"
-				? message.content
-				: message.content
-						.filter((part: { type: string; text?: string }) => part.type === "text")
-						.map((part: { type: string; text?: string }) => part.text ?? "")
-						.join("\n");
-		if (!text) return message;
-		const admitted = admitContextToolResult(text, contextWindow);
-		return admitted.admitted ? { ...message, content: [{ type: "text" as const, text: admitted.text }] } : message;
+		if (typeof message.content === "string") {
+			const admitted = admitContextToolResult(message.content, contextWindow);
+			return admitted.admitted ? { ...message, content: [{ type: "text", text: admitted.text }] } : message;
+		}
+
+		let projected = false;
+		const content = message.content.map((part) => {
+			if (part.type !== "text") return part;
+			const admitted = admitContextToolResult(part.text, contextWindow);
+			if (!admitted.admitted) return part;
+			projected = true;
+			return { ...part, text: admitted.text };
+		});
+		return projected ? { ...message, content } : message;
 	});
 }

@@ -39,6 +39,9 @@
 
 ### Fixed
 
+- Tool-result admission now preserves images and other structured content blocks in their original order while
+  projecting only oversized text blocks.
+
 ### Removed
 
 ## [2026.8.29] - 2026-08-29
