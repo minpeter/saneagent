@@ -1,5 +1,30 @@
 # changes.md — builtin compaction policy
 
+## Preserve structured tool-result content during admission (2026-08-30)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/compaction/orchestration.ts` now projects oversized text
+  blocks in place while preserving every image/non-text block and the original mixed-content ordering.
+- The real OpenAI replay pipeline is characterized with an oversized checkpoint-owned tool result: the extension
+  runner's enumerable session-entry identity survives admission and authorizes native replay without extra identity
+  copying in production.
+
+### Why
+
+- Replacing an admitted mixed tool result with one synthesized text block silently discarded images. The separate
+  replay-loss report was incorrect because the extension runner materializes session-entry identity as an enumerable
+  request-local property before context handlers run, and the existing message spread retains it.
+
+### Why an extension could not handle it
+
+- Admission is the builtin compaction extension's first context transform; later extensions cannot recover structured
+  blocks that this handler has already removed.
+
+### Expected merge conflict zones
+
+- LOW: the tool-result content mapping in `orchestration.ts`.
+
 ## Deterministic diskless tool admission (2026-08-30)
 
 ### What changed
