@@ -43,6 +43,7 @@
 
 - Tool-result admission now preserves images and other structured content blocks in their original order while
   projecting only oversized text blocks.
+- Sub-threshold idle compaction warm-ups now retry transient failures with the existing bounded idle lifecycle, and OpenAI remote-compaction lanes avoid local warming until the apply threshold so successful remote admission does not discard paid local work.
 
 ### Removed
 
