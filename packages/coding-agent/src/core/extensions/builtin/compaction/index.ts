@@ -37,12 +37,7 @@ import {
 	isOpenAiRemoteCompactionModel,
 	openAiRemoteCompactionOrigin,
 } from "./openai-remote-model.ts";
-import {
-	resolveBeforeAgentStartMessage,
-	resolveCompactionGeometry,
-	resolveIdleWarmAction,
-	shouldDeferGraceBand,
-} from "./orchestration.ts";
+import { resolveCompactionGeometry, resolveIdleWarmAction, shouldDeferGraceBand } from "./orchestration.ts";
 import * as cap from "./per-turn-cap.ts";
 import * as policy from "./policy.ts";
 import * as restoration from "./restoration-tracker.ts";
@@ -61,6 +56,7 @@ import { type CompactionExtensionState, createInitialState, resetTurnCounter } f
 import { resolveInheritedTaskIntent } from "./task-intent.ts";
 import * as todoBridge from "./todo-bridge.ts";
 import {
+	clearTokenBudgetReminderLease,
 	computeTokenBudgetReminder,
 	createInitialReminderState,
 	type TokenBudgetReminderState,
@@ -106,6 +102,7 @@ export default function compactionExtension(
 	const restorationState = state.restoration ?? restoration.createRestorationTrackerState();
 	state = { ...state, restoration: restorationState };
 	let speculativeGeneration = 0;
+	let acceptedCompactionEpoch = 0;
 	let reminderState: TokenBudgetReminderState = createInitialReminderState();
 	let speculativeJob: SpeculativeJob | undefined;
 	const pendingMetadata = new Map<string, PendingCompactionMetadata>();
@@ -712,6 +709,7 @@ export default function compactionExtension(
 			const keptEntries = firstKeptIndex === -1 ? [] : branchEntries.slice(firstKeptIndex);
 			state = cap.incrementAccepted(state);
 			state = breaker.recordSuccess(state);
+			acceptedCompactionEpoch += 1;
 			reminderState = createInitialReminderState();
 			const details = compactEvent.compactionEntry.details as
 				| { structuralYield?: { savedTokens: number; savingsRatio: number } }
@@ -781,6 +779,7 @@ export default function compactionExtension(
 		const usage = ctx.getContextUsage();
 		const contextWindow = usage?.contextWindow ?? ctx.model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
 		const settings = ctx.getCompactionSettings();
+		const compactionEpochAtTurnStart = acceptedCompactionEpoch;
 		const pendingPromptTokens = estimatePendingPromptTokens(event);
 		const usageWithPendingPrompt = usage ? withAdditionalTokens(usage, pendingPromptTokens) : undefined;
 		// The SDK owns this lane's context entirely, so even the hard-limit valve stands down;
@@ -850,21 +849,19 @@ export default function compactionExtension(
 			startSpeculativeCompaction(ctx, PROACTIVE_COMPACTION_INSTRUCTIONS);
 		}
 
-		const reminder = computeTokenBudgetReminder({
-			contextTokens: usageWithPendingPrompt?.tokens ?? 0,
-			contextWindow,
-			thresholdTokens,
-			leadTokens,
-			compactionGeneration: speculativeGeneration,
-			state: reminderState,
-		});
-		reminderState = reminder.nextState;
-		const deliveredMessage = resolveBeforeAgentStartMessage({
-			message,
-			reminder: reminder.message,
-			reminderEnabled: settings.reminderEnabled,
-		});
-		return deliveredMessage ? { message: deliveredMessage } : undefined;
+		if (settings.reminderEnabled === false) {
+			reminderState = clearTokenBudgetReminderLease(reminderState);
+		} else if (acceptedCompactionEpoch === compactionEpochAtTurnStart) {
+			reminderState = computeTokenBudgetReminder({
+				contextTokens: usageWithPendingPrompt?.tokens ?? 0,
+				contextWindow,
+				thresholdTokens,
+				leadTokens,
+				compactionEpoch: acceptedCompactionEpoch,
+				state: reminderState,
+			}).nextState;
+		}
+		return message ? { message } : undefined;
 	});
 
 	pi.on("context", (event, ctx) => {
@@ -888,6 +885,10 @@ export default function compactionExtension(
 				breakerFallback,
 				laneOwnsCompaction: lanePolicy.disablesSenpiCompaction(ctx),
 				emergencyPruneLatch,
+				reminder:
+					reminderState.lease?.compactionEpoch === acceptedCompactionEpoch
+						? reminderState.lease.message
+						: undefined,
 			}),
 		};
 	});

@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { copyContextProvenance } from "@earendil-works/pi-ai";
 import type { CompactionPreparation } from "../../../compaction/index.ts";
-import type { BeforeAgentStartEventResult } from "../../types.ts";
 import { type IdleCompactionDecision, shouldWarmAtIdle } from "./idle.ts";
 import * as policy from "./policy.ts";
 import { isWarmResultStale, isWithinGraceBand, resolveSpeculationLeadTokens } from "./speculation-lead.ts";
@@ -41,18 +41,22 @@ export function shouldDeferGraceBand(input: {
 	);
 }
 
-export function resolveBeforeAgentStartMessage(input: {
-	message?: BeforeAgentStartEventResult["message"];
-	reminder?: string;
-	reminderEnabled?: boolean;
-}): BeforeAgentStartEventResult["message"] | undefined {
-	if (!input.reminder || input.reminderEnabled === false) return input.message;
-	// The reminder only ever rides along on a message the turn was already going to
-	// deliver. Returning one from an otherwise empty handler manufactures turn-local
-	// context, which suppresses the retry controller's model-fallback dispatch
-	// (regressions/compaction-current-model-state).
-	if (!input.message) return undefined;
-	return { ...input.message, content: `${input.message.content}\n\n${input.reminder}` };
+export function injectTokenBudgetReminder(messages: AgentMessage[], reminder?: string): AgentMessage[] {
+	if (!reminder) return messages;
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (message?.role !== "user") continue;
+		const content =
+			typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : message.content;
+		const firstPart = content[0];
+		if (firstPart?.type === "text" && firstPart.text === reminder) return messages;
+		const reminded = copyContextProvenance(message, {
+			...message,
+			content: [{ type: "text" as const, text: reminder }, ...content],
+		});
+		return messages.map((candidate, candidateIndex) => (candidateIndex === index ? reminded : candidate));
+	}
+	return messages;
 }
 
 export function resolveIdleWarmAction(
