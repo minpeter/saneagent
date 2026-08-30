@@ -31,7 +31,9 @@
   `max(configured, min(4% of window, 49152))`, moving the emergency valve off 98.4% on million-token
   windows. Disable with `compaction.reserveScalingEnabled: false`.
 - While the compaction circuit breaker is cooling down and the context is over the threshold, the
-  deterministic no-LLM context reduction now runs immediately instead of waiting out the cooldown.
+  deterministic no-LLM context reduction now runs immediately instead of waiting out the cooldown. It
+  stands down on sessions whose compaction lane is owned externally, and an external-owner stand-down
+  never counts as a compaction failure against the breaker.
 - `grep` is temporarily withheld from the model-facing tool surface. It no longer appears in the
   system prompt or the active tool names, so the model can neither see nor call it. The tool is
   still built and stays resolvable by name for programmatic callers such as the Cursor exec bridge,

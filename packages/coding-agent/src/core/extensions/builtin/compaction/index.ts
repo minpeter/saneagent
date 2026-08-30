@@ -757,6 +757,11 @@ export default function compactionExtension(
 			}
 			return;
 		}
+		// `external-owner` is senpi standing down for a lane the SDK owns, not a senpi
+		// failure. Debiting the breaker for it would trip senpi's own health accounting
+		// on a healthy session. The cause is read off the event, so the lane policy is
+		// never re-consulted here and no extra provider-settings read is paid.
+		if (compactEvent.rejectionCause === "external-owner") return;
 		state = breaker.recordFailure(state, Date.now(), { route: compactEvent.reason });
 	});
 
