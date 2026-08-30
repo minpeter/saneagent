@@ -54,6 +54,28 @@
 
 # Builtin compaction extension changes
 
+## Align idle warm lifecycle with compaction lane ownership (2026-08-30)
+
+### What changed
+
+- `index.ts` enrolls newly started sub-threshold idle warm jobs in the same bounded transient-failure retry lifecycle as above-threshold idle jobs. Retry admission now re-checks the warm-generation floor instead of requiring the apply threshold; the idle apply still requires a fresh above-threshold decision.
+- Sub-threshold local warming is skipped for OpenAI remote-compaction-capable models. Above-threshold idle generation and apply remain local, and the existing remote-first blocking route still falls back to local generation when remote compaction is unavailable.
+- `idle-retry.ts` names its retry gate for warm eligibility rather than threshold eligibility.
+
+### Why
+
+- The half-window idle path started a speculative job without arming its retry watcher. One transient failure therefore left a failed job for later threshold admission to inherit, even though the established idle lifecycle had bounded retries for the same failure class.
+- A completed sub-threshold local summary cannot be consumed by OpenAI remote compaction. Successful remote threshold admission aborted that already-paid local work, so warming it had cost without a viable owner.
+
+### Why an extension could not handle it
+
+- Speculative job ownership, idle retry registration, and remote/local route ordering are private state inside this builtin. Another extension cannot attach lifecycle watchers or transfer a warm job between these routes.
+
+### Expected merge conflict zones
+
+- MEDIUM: `index.ts` around `armIdleWarmupRetry` and the `agent_end` warm-action branch.
+- LOW: `idle-retry.ts` retry decision naming.
+
 ## Apply idle warm compaction during the idle gap (2026-08-26)
 
 ### What changed
