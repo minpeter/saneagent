@@ -3,6 +3,7 @@ import { StreamDurationBudgetError, StreamIdleTimeoutError } from "../../../comp
 import { filterContextExcludedMessages } from "../../../messages.ts";
 import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../../../session-manager.ts";
 import { SummarizationOverflowExhaustedError } from "./overflow-retry.ts";
+import { resolveEffectiveReserveTokens } from "./policy.ts";
 import { hasUnsafeRetainedContent } from "./retained-message-safety.ts";
 import { SummaryRequestError } from "./speculative.ts";
 import { capUtf8Bytes } from "./task-intent.ts";
@@ -179,7 +180,9 @@ export function createRequiredCompactionFallback(
 			return undefined;
 		}
 		if (hasUnsafeRetainedContent(retainedMessages)) return undefined;
-		const budget = contextWindow - preparation.settings.reserveTokens;
+		// The hard-limit valve reserves the scaled budget, so accepting against the raw
+		// configured reserve would admit a context that valve immediately compacts again.
+		const budget = contextWindow - resolveEffectiveReserveTokens(contextWindow, preparation.settings);
 		const retainedTokens = estimateConservativeTokens(retainedMessages, budget);
 		if (retainedTokens > budget) return undefined;
 		return { ...result, estimatedTokensAfter: retainedTokens };

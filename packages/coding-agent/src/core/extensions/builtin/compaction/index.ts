@@ -744,13 +744,10 @@ export default function compactionExtension(
 					compactionEntryId: compactEvent.compactionEntry.id,
 					contextWindow: usage?.contextWindow ?? ctx.model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
 					usageTokens: usage?.tokens ?? null,
-					reserveTokens:
-						settings.reserveScalingEnabled === false
-							? settings.reserveTokens
-							: policy.resolveReserveTokens(
-									usage?.contextWindow ?? ctx.model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
-									settings.reserveTokens,
-								),
+					reserveTokens: policy.resolveEffectiveReserveTokens(
+						usage?.contextWindow ?? ctx.model?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+						settings,
+					),
 					settings,
 					keptMessages: keptEntries.flatMap((entry) => {
 						if (entry.type !== "message") return [];
