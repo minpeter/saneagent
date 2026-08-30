@@ -30,8 +30,11 @@ export function buildCompactionContext(input: {
 		input.contextWindow,
 		input.toolAdmissionEnabled,
 	);
+	// Reduction rewrites history. When another lane owns compaction that history is
+	// not senpi's to touch, so the breaker's deterministic fallback is gated on
+	// ownership independently of the usage threshold below.
 	const sourceMessages =
-		input.breakerFallback ||
+		(input.breakerFallback && !input.laneOwnsCompaction) ||
 		shouldApplyContextReduction({
 			usageTokens: input.ctx.getContextUsage()?.tokens ?? null,
 			contextWindow: input.contextWindow,

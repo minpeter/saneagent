@@ -1389,3 +1389,25 @@ untouched. Expected upstream conflict zones: `builtin/compaction/speculative.ts`
 - Added optional settings for grace-band deferral, tool-result admission, context reminders, reserve scaling, and a configured speculative lead override; all feature gates default to enabled.
 - Tool results exceeding the admission cap are spilled to `os.tmpdir()/senpi-tool-spill` and represented by bounded excerpts, with marker-aware re-admission bypass.
 - Context reminders are delivered through the existing `before_agent_start` custom-message return seam and reset after accepted compaction. Breaker trips retain deterministic context reduction rather than leaving the context untouched.
+
+## 2026-08-30 - External lane ownership survives the circuit breaker
+
+### What changed
+
+- `index.ts` `session_compact`: a rejection carrying `rejectionCause: "external-owner"` returns before `breaker.recordFailure()`. Every other rejection cause still debits the breaker exactly as before. The cause is read off the event, so the lane policy is not re-consulted and no additional provider-settings read is paid.
+- `context-pipeline.ts`: the breaker's deterministic context-reduction fallback is now `breakerFallback && !laneOwnsCompaction`. The reduction pass therefore stands down on an externally owned lane even when the breaker is tripped, narrowing the 2026-08-29 entry above: breaker trips retain deterministic reduction only on lanes senpi owns.
+
+### Why
+
+- Senpi declining to compact an SDK-native lane is a policy stand-down, not a senpi failure. Debiting the breaker for it tripped senpi's own health accounting on a perfectly healthy session after three ordinary turns.
+- Once tripped, `breakerFallback` short-circuited ahead of `shouldApplyContextReduction()`, whose `isProviderNativeCompactionPath` gate already stands reduction down for owned lanes. That let senpi rewrite a history the Claude Agent SDK owns — the exact thing `lane-policy.ts` exists to prevent. The two guards are independent because a breaker tripped by earlier senpi-owned failures must still stand down once the session moves onto an SDK-native lane.
+
+### Why an extension could not handle it
+
+- Both the breaker counter and the context-reduction fallback are private state of the builtin compaction extension closure; no public hook observes a rejection cause before the debit or intercepts the reduction pass.
+
+### Expected merge conflict zones
+
+- LOW: `index.ts` around the `session_compact` rejected branch.
+- LOW: `context-pipeline.ts` around the `sourceMessages` reduction predicate.
+- Coverage: `test/compaction/external-owner-breaker-isolation.test.ts`.
