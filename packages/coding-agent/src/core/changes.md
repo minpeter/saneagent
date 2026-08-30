@@ -1,5 +1,32 @@
 # changes
 
+## Reject model downswitches that exceed the target budget (2026-08-30)
+
+### What changed
+
+- `packages/coding-agent/src/core/agent-session.ts` adds current live-context usage to the assembled
+  model budget before direct or favorite-cycle downswitches. Rejected switches leave the active
+  model, persisted session history, and global defaults unchanged.
+- The rejection reports every measured budget component and directs callers to compact, revalidate,
+  and retry. A successful manual compaction reduces the live projection, so the same explicit switch
+  can then be retried normally.
+
+### Why
+
+- A session accumulated under a million-token model could previously commit a 372K model before
+  discovering that its live transcript plus prompt, tools, and reserves did not fit. The next turn
+  then entered emergency overflow recovery from a model state that was invalid when selected.
+
+### Why an extension could not handle it
+
+- Direct and favorite-cycle model selection mutate private session state and persistence before a
+  post-selection extension hook runs. Admission must happen at that shared pre-commit boundary.
+
+### Expected merge conflict zones
+
+- MEDIUM: `packages/coding-agent/src/core/agent-session.ts` around `_setModel`,
+  `_cycleFavoriteModel`, and the model-budget assertion.
+
 ## Reject models with unusable assembled context budgets (2026-08-30)
 
 ### What changed

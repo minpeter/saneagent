@@ -46,7 +46,9 @@
 - Sub-threshold idle compaction warm-ups now retry transient failures with the existing bounded idle lifecycle, and OpenAI remote-compaction lanes avoid local warming until the apply threshold so successful remote admission does not discard paid local work.
 - Models whose context window cannot hold the assembled system prompt and active tool schemas plus
   output, compaction, speculation, and model-family safety reserves are now rejected at session setup
-  or explicit selection with an exact budget shortfall instead of entering permanent compaction
+  or explicit selection with an exact budget shortfall instead of entering permanent compaction. A
+  downswitch also includes the current live context and is refused before mutation when it cannot fit,
+  with compact/revalidate/retry guidance
   ([#1194](https://github.com/code-yeongyu/senpi/pull/1194) by
   [@minpeter](https://github.com/minpeter)).
 

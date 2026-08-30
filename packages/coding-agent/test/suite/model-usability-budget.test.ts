@@ -7,6 +7,56 @@ import {
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
+function seedLiveContext(harness: Harness, tokens: number): void {
+	const timestamp = Date.now();
+	const model = harness.getModel();
+	harness.sessionManager.appendMessage({
+		role: "user",
+		content: [{ type: "text", text: "large live context ".repeat(30_000) }],
+		timestamp: timestamp - 3,
+	});
+	harness.sessionManager.appendMessage({
+		role: "assistant",
+		content: [{ type: "text", text: "earlier response" }],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		stopReason: "stop",
+		usage: {
+			input: 150_000,
+			output: 1_000,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 151_000,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		timestamp: timestamp - 2,
+	});
+	harness.sessionManager.appendMessage({
+		role: "user",
+		content: [{ type: "text", text: "continue" }],
+		timestamp: timestamp - 1,
+	});
+	harness.sessionManager.appendMessage({
+		role: "assistant",
+		content: [{ type: "text", text: "still working" }],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		stopReason: "stop",
+		usage: {
+			input: tokens - 1_000,
+			output: 1_000,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: tokens,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		timestamp,
+	});
+	harness.session.agent.state.messages = harness.sessionManager.buildSessionContext().messages;
+}
+
 describe("model usability budget", () => {
 	const harnesses: Harness[] = [];
 
@@ -39,6 +89,107 @@ describe("model usability budget", () => {
 		expect(error.message).toBe(
 			'Model "faux/low-context" cannot start: context window 16000 tokens is 21464 tokens short of the 37464-token minimum (system prompt 1, active tool schemas 695, output reserve 4000, compaction reserve 16384, speculation lead 8192, safety margin 8192 [default]).',
 		);
+	});
+
+	it("rejects a downswitch before committing when live context exceeds the target budget", async () => {
+		// given
+		const harness = await createHarness({
+			models: [
+				{ id: "million", contextWindow: 1_000_000, maxTokens: 32_000 },
+				{ id: "372k", contextWindow: 372_000, maxTokens: 32_000 },
+			],
+		});
+		harnesses.push(harness);
+		const target = harness.getModel("372k");
+		if (!target) throw new Error("missing downswitch target fixture");
+		seedLiveContext(harness, 321_000);
+
+		// when
+		const error = await harness.session.setModel(target).then(
+			() => undefined,
+			(reason: unknown) => reason,
+		);
+
+		// then
+		expect(error).toBeInstanceOf(ModelUsabilityBudgetError);
+		if (!(error instanceof ModelUsabilityBudgetError)) throw new Error("expected downswitch budget rejection");
+		expect(error.projection).toMatchObject({
+			model: "faux/372k",
+			contextWindow: 372_000,
+			liveContextTokens: 321_000,
+			outputReserveTokens: 32_000,
+			compactionReserveTokens: 16_384,
+			safetyMarginTokens: 8_192,
+			usable: false,
+		});
+		expect(error.projection.speculationLeadTokens).toBeGreaterThan(0);
+		expect(error.projection.requiredTokens).toBe(
+			error.projection.liveContextTokens +
+				error.projection.systemPromptTokens +
+				error.projection.activeToolSchemaTokens +
+				error.projection.outputReserveTokens +
+				error.projection.compactionReserveTokens +
+				error.projection.speculationLeadTokens +
+				error.projection.safetyMarginTokens,
+		);
+		expect(harness.session.model?.id).toBe("million");
+		expect(harness.settingsManager.getDefaultModel()).not.toBe("372k");
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "model_change")).toEqual([]);
+	});
+
+	it("accepts a downswitch when live context fits the target budget", async () => {
+		// given
+		const harness = await createHarness({
+			models: [
+				{ id: "million", contextWindow: 1_000_000, maxTokens: 32_000 },
+				{ id: "372k", contextWindow: 372_000, maxTokens: 32_000 },
+			],
+		});
+		harnesses.push(harness);
+		seedLiveContext(harness, 200_000);
+		const target = harness.getModel("372k");
+		if (!target) throw new Error("missing accepted downswitch target fixture");
+
+		// when
+		await harness.session.setModel(target);
+
+		// then
+		expect(harness.session.model?.id).toBe("372k");
+	});
+
+	it("revalidates and accepts a rejected downswitch after explicit compaction", async () => {
+		// given
+		const harness = await createHarness({
+			models: [
+				{ id: "million", contextWindow: 1_000_000, maxTokens: 32_000 },
+				{ id: "372k", contextWindow: 372_000, maxTokens: 32_000 },
+			],
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", (event) => ({
+						compaction: {
+							summary: "compact summary",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+						},
+					}));
+				},
+			],
+		});
+		harnesses.push(harness);
+		seedLiveContext(harness, 321_000);
+		const target = harness.getModel("372k");
+		if (!target) throw new Error("missing compact-retry target fixture");
+		await expect(harness.session.setModel(target)).rejects.toBeInstanceOf(ModelUsabilityBudgetError);
+
+		// when
+		await harness.session.compact();
+		await harness.session.setModel(target);
+
+		// then
+		expect(harness.session.model?.id).toBe("372k");
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "model_change")).toHaveLength(1);
 	});
 
 	it("rejects an unusable initial model after SDK session assembly", async () => {
