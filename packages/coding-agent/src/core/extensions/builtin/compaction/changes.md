@@ -102,9 +102,11 @@
 
 - `model-usability-budget.ts` projects one typed minimum context budget from the assembled system
   prompt, active tool schemas, model output reserve, effective compaction reserve, speculation lead,
-  and a data table of model-family safety margins.
-- `agent-session.ts` rejects an unusable model during explicit selection; `sdk.ts` applies the same
-  check after session setup has assembled the runtime prompt and active tools.
+  a data table of model-family safety margins, and (for a downswitch) the current live context.
+- `agent-session.ts` rejects an unusable model during direct or favorite-cycle selection before any
+  model, history, or default mutation; `sdk.ts` applies the fixed-budget check after session setup has
+  assembled the runtime prompt and active tools. A live-context rejection carries compact, revalidate,
+  and retry guidance, while a successful explicit compaction lets the caller retry the same switch.
 - Disabling compaction removes both its reserve and speculation lead from the projection, while
   disabling speculation removes only the lead. Reserve-scaling opt-out continues to use the exact
   configured reserve.
@@ -114,6 +116,9 @@
 - Small-context models could have a speculation lead at or beyond their compaction threshold and
   enter permanent compaction before the prompt and tool surface left any room for useful work.
   A measured rejection explains the exact shortfall instead of silently degrading.
+- A statically usable target could still be too small for a transcript accumulated on a larger model;
+  committing that downswitch deferred the failure until the next provider request. The live projection
+  now refuses that invalid state and makes compaction an explicit, revalidated recovery step.
 
 ### Why an extension could not handle it
 

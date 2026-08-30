@@ -22,6 +22,7 @@ const MODEL_SAFETY_MARGIN_PROFILES: readonly ModelSafetyMarginProfile[] = [
 export interface ModelUsabilityBudgetProjection {
 	readonly model: string;
 	readonly contextWindow: number;
+	readonly liveContextTokens: number;
 	readonly systemPromptTokens: number;
 	readonly activeToolSchemaTokens: number;
 	readonly outputReserveTokens: number;
@@ -38,6 +39,7 @@ export interface ModelUsabilityBudgetInput<TApi extends Api> {
 	readonly model: Model<TApi>;
 	readonly systemPrompt: string;
 	readonly tools: readonly Tool[];
+	readonly liveContextTokens?: number;
 	readonly compaction: CompactionPreparation["settings"];
 }
 
@@ -60,6 +62,7 @@ function resolveSafetyMarginProfile<TApi extends Api>(model: Model<TApi>): Model
 export function projectModelUsabilityBudget<TApi extends Api>(
 	input: ModelUsabilityBudgetInput<TApi>,
 ): ModelUsabilityBudgetProjection {
+	const liveContextTokens = input.liveContextTokens ?? 0;
 	const systemPromptTokens = estimateContextTokens({
 		systemPrompt: input.systemPrompt,
 		messages: [],
@@ -79,6 +82,7 @@ export function projectModelUsabilityBudget<TApi extends Api>(
 		input.compaction.enabled && input.compaction.speculativeEnabled !== false ? geometry.leadTokens : 0;
 	const safetyMargin = resolveSafetyMarginProfile(input.model);
 	const requiredTokens =
+		liveContextTokens +
 		systemPromptTokens +
 		activeToolSchemaTokens +
 		outputReserveTokens +
@@ -90,6 +94,7 @@ export function projectModelUsabilityBudget<TApi extends Api>(
 	return {
 		model: `${input.model.provider}/${input.model.id}`,
 		contextWindow: input.model.contextWindow,
+		liveContextTokens,
 		systemPromptTokens,
 		activeToolSchemaTokens,
 		outputReserveTokens,
@@ -107,9 +112,12 @@ export class ModelUsabilityBudgetError extends Error {
 	readonly projection: ModelUsabilityBudgetProjection;
 
 	constructor(projection: ModelUsabilityBudgetProjection) {
-		super(
-			`Model "${projection.model}" cannot start: context window ${projection.contextWindow} tokens is ${projection.shortfallTokens} tokens short of the ${projection.requiredTokens}-token minimum (system prompt ${projection.systemPromptTokens}, active tool schemas ${projection.activeToolSchemaTokens}, output reserve ${projection.outputReserveTokens}, compaction reserve ${projection.compactionReserveTokens}, speculation lead ${projection.speculationLeadTokens}, safety margin ${projection.safetyMarginTokens} [${projection.safetyMarginProfile}]).`,
-		);
+		const breakdown = `system prompt ${projection.systemPromptTokens}, active tool schemas ${projection.activeToolSchemaTokens}, output reserve ${projection.outputReserveTokens}, compaction reserve ${projection.compactionReserveTokens}, speculation lead ${projection.speculationLeadTokens}, safety margin ${projection.safetyMarginTokens} [${projection.safetyMarginProfile}]`;
+		const message =
+			projection.liveContextTokens > 0
+				? `Model "${projection.model}" cannot switch: target context window ${projection.contextWindow} tokens is ${projection.shortfallTokens} tokens short of the ${projection.requiredTokens}-token requirement (live context ${projection.liveContextTokens}, ${breakdown}). Compact the session, then revalidate and retry the model switch.`
+				: `Model "${projection.model}" cannot start: context window ${projection.contextWindow} tokens is ${projection.shortfallTokens} tokens short of the ${projection.requiredTokens}-token minimum (${breakdown}).`;
+		super(message);
 		this.name = "ModelUsabilityBudgetError";
 		this.projection = projection;
 	}
