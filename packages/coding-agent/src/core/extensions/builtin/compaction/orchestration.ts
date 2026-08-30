@@ -1,12 +1,10 @@
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { CompactionPreparation } from "../../../compaction/index.ts";
 import type { BeforeAgentStartEventResult } from "../../types.ts";
 import { type IdleCompactionDecision, shouldWarmAtIdle } from "./idle.ts";
 import * as policy from "./policy.ts";
 import { isWarmResultStale, isWithinGraceBand, resolveSpeculationLeadTokens } from "./speculation-lead.ts";
-import { admitToolResult, containsToolAdmissionMarker } from "./tool-admission.ts";
+import { admitToolResult } from "./tool-admission.ts";
 
 export interface CompactionGeometry {
 	reserveTokens: number;
@@ -67,14 +65,9 @@ export function resolveIdleWarmAction(
 	return isWarmResultStale(job.armedAtTokens, currentTokens, decision.settings.keepRecentTokens) ? "replace" : "none";
 }
 
-export function admitContextToolResult(
-	text: string,
-	contextWindow: number,
-	spillDir: string,
-): { text: string; admitted: boolean } {
-	if (containsToolAdmissionMarker(text)) return { text, admitted: false };
-	const result = admitToolResult({ text, contextWindow, spillDir });
-	return { text: result.text, admitted: result.spilled };
+export function admitContextToolResult(text: string, contextWindow: number): { text: string; admitted: boolean } {
+	const result = admitToolResult({ text, contextWindow });
+	return { text: result.text, admitted: result.projected };
 }
 
 export function admitContextToolResults(
@@ -93,7 +86,7 @@ export function admitContextToolResults(
 						.map((part: { type: string; text?: string }) => part.text ?? "")
 						.join("\n");
 		if (!text) return message;
-		const admitted = admitContextToolResult(text, contextWindow, join(tmpdir(), "senpi-tool-spill"));
+		const admitted = admitContextToolResult(text, contextWindow);
 		return admitted.admitted ? { ...message, content: [{ type: "text" as const, text: admitted.text }] } : message;
 	});
 }
