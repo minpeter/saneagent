@@ -1,5 +1,34 @@
 # changes
 
+## Reject models with unusable assembled context budgets (2026-08-30)
+
+### What changed
+
+- `packages/coding-agent/src/core/agent-session.ts` projects the selected model against the current
+  assembled system prompt, active tool schemas, output reserve, effective compaction reserve,
+  speculation lead, and model-family safety margin before mutating explicit model selection.
+- `packages/coding-agent/src/core/sdk.ts` runs the same projection after `AgentSession` construction,
+  when the initial runtime prompt and active tools have been assembled, and rejects setup with the
+  projection's precise budget diagnostic when the model is unusable.
+
+### Why
+
+- A small context window can put the fixed speculation lead at or beyond its compaction threshold.
+  Accepting that model creates a session with no useful conversation budget and causes permanent
+  compaction; setup and explicit selection now fail before provider traffic or model mutation.
+
+### Why an extension could not handle it
+
+- Session construction and explicit model mutation are core boundaries. Extensions cannot reject
+  initial creation after the final prompt/tool assembly or atomically guard every model-selection
+  caller before persistence.
+
+### Expected merge conflict zones
+
+- MEDIUM: `packages/coding-agent/src/core/agent-session.ts` around `_setModel` and the public budget
+  assertion used by runtime setup.
+- LOW: `packages/coding-agent/src/core/sdk.ts` immediately after `AgentSession` construction.
+
 ## Compaction settings resolution moved out of the settings manager (2026-08-29)
 
 ### What changed

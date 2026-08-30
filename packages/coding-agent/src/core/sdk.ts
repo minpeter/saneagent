@@ -515,6 +515,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionStartEvent,
 		autoTitleSessions: options.autoTitleSessions,
 	});
+	session.assertModelUsable();
 	cursorBridgeSessionRef.current = session;
 	const extensionsResult = resourceLoader.getExtensions();
 
