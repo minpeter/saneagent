@@ -96,6 +96,35 @@
 - MEDIUM: `index.ts` around `armIdleWarmupRetry` and the `agent_end` warm-action branch.
 - LOW: `idle-retry.ts` retry decision naming.
 
+## Model usability budget admission (2026-08-30)
+
+### What changed
+
+- `model-usability-budget.ts` projects one typed minimum context budget from the assembled system
+  prompt, active tool schemas, model output reserve, effective compaction reserve, speculation lead,
+  and a data table of model-family safety margins.
+- `agent-session.ts` rejects an unusable model during explicit selection; `sdk.ts` applies the same
+  check after session setup has assembled the runtime prompt and active tools.
+- Disabling compaction removes both its reserve and speculation lead from the projection, while
+  disabling speculation removes only the lead. Reserve-scaling opt-out continues to use the exact
+  configured reserve.
+
+### Why
+
+- Small-context models could have a speculation lead at or beyond their compaction threshold and
+  enter permanent compaction before the prompt and tool surface left any room for useful work.
+  A measured rejection explains the exact shortfall instead of silently degrading.
+
+### Why an extension could not handle it
+
+- Initial session creation and model mutation must reject before a provider request is admitted;
+  an extension cannot atomically guard every core model-selection and runtime-creation path.
+
+### Expected merge conflict zones
+
+- LOW: the projection imports shared compaction geometry and output-reserve helpers; keep those
+  dependencies aligned if either helper moves.
+
 ## Apply idle warm compaction during the idle gap (2026-08-26)
 
 ### What changed

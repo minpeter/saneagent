@@ -44,6 +44,11 @@
 - Tool-result admission now preserves images and other structured content blocks in their original order while
   projecting only oversized text blocks.
 - Sub-threshold idle compaction warm-ups now retry transient failures with the existing bounded idle lifecycle, and OpenAI remote-compaction lanes avoid local warming until the apply threshold so successful remote admission does not discard paid local work.
+- Models whose context window cannot hold the assembled system prompt and active tool schemas plus
+  output, compaction, speculation, and model-family safety reserves are now rejected at session setup
+  or explicit selection with an exact budget shortfall instead of entering permanent compaction
+  ([#1194](https://github.com/code-yeongyu/senpi/pull/1194) by
+  [@minpeter](https://github.com/minpeter)).
 
 ### Removed
 
