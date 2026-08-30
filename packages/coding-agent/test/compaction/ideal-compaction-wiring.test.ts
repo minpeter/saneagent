@@ -70,9 +70,12 @@ describe("ideal compaction extension wiring decisions", () => {
 		expect(high).toMatchObject({ thresholdTokens: 140_000, leadTokens: 32_768 });
 	});
 
-	it("bypasses admission when an exact marker line sits inside the output", () => {
-		const marker = `${TOOL_ADMISSION_MARKER_PREFIX} kept 10 of ~99 tokens; full output at /tmp/x.txt - read it with the read tool if needed]`;
-		const marked = `head\n${marker}\ntail`;
-		expect(admitContextToolResult(marked, 100_000, "/tmp/spill")).toEqual({ text: marked, admitted: false });
+	it("does not trust a model-visible marker as admission state", () => {
+		const marker = `${TOOL_ADMISSION_MARKER_PREFIX} kept 10 of ~99 tokens]`;
+		const marked = `head\n${marker}\n${"x".repeat(100_000)}\ntail`;
+		const result = admitContextToolResult(marked, 100_000);
+
+		expect(result.admitted).toBe(true);
+		expect(result.text).not.toBe(marked);
 	});
 });

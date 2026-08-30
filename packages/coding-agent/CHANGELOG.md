@@ -7,9 +7,9 @@
 ### Added
 
 - Oversized tool results are now capped before they enter the context. A single result is limited to
-  `min(50000, max(8192, 5% of the context window))`; the full output is written to a spill file and
-  the kept excerpt carries a marker naming that path, so the model can read it back on demand.
-  Disable with `compaction.toolAdmissionEnabled: false`.
+  `min(50000, max(8192, 5% of the context window))` with a deterministic, diskless head/tail
+  projection. Admission is re-derived from content on every request, so output that reproduces the
+  visible projection marker cannot bypass the cap. Disable with `compaction.toolAdmissionEnabled: false`.
 - A context-budget reminder is delivered once per compaction generation as the remaining runway
   approaches the threshold, so the model can wrap up verbose exploration before the summary is
   taken. Disable with `compaction.reminderEnabled: false`.

@@ -1,3 +1,32 @@
+# changes.md — builtin compaction policy
+
+## Deterministic diskless tool admission (2026-08-30)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/compaction/tool-admission.ts` now replaces oversized tool
+  results with a deterministic in-memory head/tail projection instead of synchronously writing full results to
+  random spill files. Projection keeps shrinking until its estimated text is at or below the configured admission
+  cap, and visible marker text is never interpreted as trusted state.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/orchestration.ts` no longer allocates a shared
+  temporary spill directory or bypasses admission when tool output contains a marker-shaped line.
+
+### Why
+
+- Context projections are rebuilt from persisted original messages on every provider request. Random spill names
+  therefore caused unbounded duplicate files with umask-dependent permissions, while synchronous filesystem
+  failures could abort this context handler and skip downstream compaction transforms. A forgeable marker also
+  allowed oversized output to bypass the cap.
+
+### Why an extension could not handle it
+
+- This is the builtin compaction extension's context-admission boundary itself. An external extension cannot make
+  an earlier builtin handler deterministic or recover downstream transforms after that handler throws.
+
+### Expected merge conflict zones
+
+- LOW: the admission call in `orchestration.ts` and the projection format and cap loop in `tool-admission.ts`.
+
 # Builtin compaction extension changes
 
 ## Apply idle warm compaction during the idle gap (2026-08-26)
