@@ -1,5 +1,26 @@
 # changes.md — builtin compaction policy
 
+## Deliver retry-safe ephemeral budget reminders (2026-08-30)
+
+### What changed
+
+- `before_agent_start` now arms a one-user-turn reminder lease keyed to the accepted-compaction epoch instead of returning a custom reminder message or consuming an undelivered generation.
+- The context projection prepends the leased reminder to the real user message without persisting or adding a turn. Repeated provider projections reuse that shape, so retry/model fallback sees one reminder while the next user turn, disablement, or accepted compaction clears the lease.
+- Restoration custom messages remain separate and unchanged.
+
+### Why
+
+- Ordinary turns had no restoration payload for the reminder to ride on, so the previous state advanced without delivering anything. Returning a standalone custom message fixed delivery but suppressed model fallback. A context-only lease reaches every attempt of the same logical turn without entering session history or changing retry dispatch.
+
+### Why an extension could not handle it
+
+- The lease coordinates this builtin's private compaction epoch, reminder policy, restoration payload, and context transform. Another extension cannot safely observe or mutate that state.
+
+### Expected merge conflict zones
+
+- MEDIUM: `index.ts` around accepted `session_compact`, `before_agent_start`, and `context` handlers.
+- LOW: `token-budget-reminder.ts`, `orchestration.ts`, and `context-pipeline.ts` around reminder state/projection.
+
 ## Preserve structured tool-result content during admission (2026-08-30)
 
 ### What changed
@@ -51,7 +72,6 @@
 ### Expected merge conflict zones
 
 - LOW: the admission call in `orchestration.ts` and the projection format and cap loop in `tool-admission.ts`.
-
 # Builtin compaction extension changes
 
 ## Align idle warm lifecycle with compaction lane ownership (2026-08-30)

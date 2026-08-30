@@ -17,7 +17,9 @@ function lastUserText(context: Context): string {
 		if (message?.role !== "user") continue;
 		const text = getMessageText(message);
 		if (text.startsWith(HIDDEN_RESTORATION_PREFIX)) continue;
-		return text;
+		if (typeof message.content === "string") return text;
+		const lastText = message.content.findLast((part) => part.type === "text");
+		return lastText?.text ?? text;
 	}
 	return "";
 }
@@ -100,7 +102,12 @@ describe("Regression: compaction state during model fallback", () => {
 			if (prompt === "prompt after compaction") return fauxAssistantMessage("next answer");
 			return fauxAssistantMessage("compacted on active fallback");
 		};
-		harness.setResponses([response, response, response, response]);
+		const fallbackPromptContexts: Context[] = [];
+		const retryAwareResponse: FauxResponseFactory = async (context, options, state, model) => {
+			if (lastUserText(context) === "trigger fallback") fallbackPromptContexts.push(context);
+			return await response(context, options, state, model);
+		};
+		harness.setResponses([retryAwareResponse, retryAwareResponse, response, response]);
 
 		await harness.session.prompt("trigger fallback");
 		const compactionModels = harness.faux
@@ -111,6 +118,13 @@ describe("Regression: compaction state during model fallback", () => {
 		expect(harness.eventsOfType("retry_fallback_applied")).toMatchObject([
 			{ from: "faux/faux-1", to: "faux/faux-2" },
 		]);
+		expect(fallbackPromptContexts).toHaveLength(2);
+		for (const context of fallbackPromptContexts) {
+			const userMessages = context.messages.filter((message) => message.role === "user");
+			const prompt = userMessages.at(-1);
+			expect(prompt?.content).toHaveLength(2);
+			expect(prompt && lastUserText({ ...context, messages: [prompt] })).toBe("trigger fallback");
+		}
 		expect(compactionModels).toEqual(["faux-2"]);
 		expect(harness.session.model?.id).toBe("faux-2");
 		expect(Reflect.get(harness.session, "compactionState")).toMatchObject({
