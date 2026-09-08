@@ -4,7 +4,7 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, type Harness } from "./harness.ts";
 
-describe("session model policy", () => {
+describe("session configured model", () => {
 	const harnesses: Harness[] = [];
 	afterEach(() => {
 		for (const harness of harnesses.splice(0)) harness.cleanup();
@@ -20,7 +20,7 @@ describe("session model policy", () => {
 	}
 	function policySettings(h: Harness) {
 		const settings = h.getExtensionRunner().createContext().sessionSettings;
-		if (!settings.setModelPolicy) throw new Error("Session model policy API is missing");
+		if (!settings.setModelPolicy) throw new Error("Session configured model API is missing");
 		return { ...settings, setModelPolicy: settings.setModelPolicy.bind(settings) };
 	}
 	it("layers over settings chains, preserves explicit model, and never writes settings", async () => {

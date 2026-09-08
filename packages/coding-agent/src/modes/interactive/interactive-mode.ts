@@ -1205,13 +1205,13 @@ export class InteractiveMode {
 						? this.session.scopedModels.map((s) => s.model)
 						: this.session.modelRuntime.getAvailableSnapshot();
 
-				const policyItems = this.session.hasModelPolicy
+				const policyItems = this.session.hasConfiguredModel
 					? createFuzzyAutocompleteItems(
 							[
 								{
-									value: "policy",
-									label: "Use configured model policy",
-									description: "Return model selection to the configured policy.",
+									value: "configured",
+									label: "Use configured model",
+									description: "Return model selection to the configured model order and fallback chain.",
 								},
 							],
 							prefix,
@@ -6894,7 +6894,7 @@ export class InteractiveMode {
 	}
 
 	private async handleModelCommand(searchTerm?: string): Promise<void> {
-		const action = resolveModelCommandAction(searchTerm, { hasPolicy: this.session.hasModelPolicy });
+		const action = resolveModelCommandAction(searchTerm, { hasConfiguredModel: this.session.hasConfiguredModel });
 		if (action.kind === "open-selector") {
 			this.showModelSelector();
 			return;
@@ -6903,8 +6903,8 @@ export class InteractiveMode {
 			this.showError(action.message);
 			return;
 		}
-		if (action.kind === "follow-policy") {
-			await this.followModelPolicyFromUi();
+		if (action.kind === "follow-configured") {
+			await this.followConfiguredModelFromUi();
 			return;
 		}
 
@@ -6921,16 +6921,16 @@ export class InteractiveMode {
 	 * Hand the MAIN slot back to the configured chain. Failures (no authenticated model in the
 	 * policy) are reported like any other model switch failure rather than escaping into the UI.
 	 */
-	private async followModelPolicyFromUi(): Promise<void> {
+	private async followConfiguredModelFromUi(): Promise<void> {
 		try {
-			const systemPromptChange = await this.session.followModelPolicy();
+			const systemPromptChange = await this.session.followConfiguredModel();
 			this.footer.invalidate();
 			this.updateEditorBorderColor();
 			const applied = systemPromptChange?.systemPromptName
 				? ` (optimized system prompt applied: ${systemPromptChange.systemPromptName})`
 				: "";
 			const model = this.session.model;
-			this.showStatus(`Model: ${model?.id ?? "unknown"} (following configured policy)${applied}`);
+			this.showStatus(`Model: ${model?.id ?? "unknown"} (following configured model selection)${applied}`);
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}
@@ -7178,12 +7178,12 @@ export class InteractiveMode {
 					onFavoriteChange: async (favoriteIds, allModels) => {
 						await this.applyFavoriteSelection(favoriteIds, allModels, true, await favoritePatternSnapshot);
 					},
-					policyOwned: this.session.isModelPolicyOwned,
-					onFollowPolicy: this.session.hasModelPolicy
+					configuredOwned: this.session.isConfiguredModelOwned,
+					onFollowConfiguredModel: this.session.hasConfiguredModel
 						? () => {
 								done();
 								this.ui.requestRender();
-								void this.followModelPolicyFromUi();
+								void this.followConfiguredModelFromUi();
 							}
 						: undefined,
 				},

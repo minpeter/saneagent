@@ -263,7 +263,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const lastModelSelection = sessionManager
 		.getBranch()
 		.findLast((entry) => entry.type === "model_change" && !entry.reason && entry.selectionIntent !== "programmatic");
-	const followsPolicy = lastModelSelection?.type === "model_change" && lastModelSelection.selectionIntent === "policy";
+	const followsPolicy = lastModelSelection?.type === "model_change" && lastModelSelection.selectionIntent === "configured";
 	const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
 
 	let model = options.model;

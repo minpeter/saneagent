@@ -30,11 +30,11 @@ describe("configured policy picker action", () => {
 		vi.restoreAllMocks();
 	});
 
-	function open(onFollowPolicy?: () => void, scoped = false, policyOwned = false) {
+	function open(onFollowConfiguredModel?: () => void, scoped = false, configuredOwned = false) {
 		const onSelect = vi.fn();
 		const onCancel = vi.fn();
 		const onFavoriteChange = vi.fn();
-		const options = { onFollowPolicy, onFavoriteChange, favoriteModelIds: [], policyOwned };
+		const options = { onFollowConfiguredModel, onFavoriteChange, favoriteModelIds: [], configuredOwned };
 		selector = new ModelSelectorComponent(
 			{ requestRender: vi.fn(), terminal: { rows: 24 } },
 			harness.getModel(),
@@ -49,13 +49,13 @@ describe("configured policy picker action", () => {
 		return { onSelect, onCancel, onFavoriteChange };
 	}
 
-	it.each(["policy", "manual-other", "manual-same-primary", "unconfigured"] as const)(
+	it.each(["configured", "manual-other", "manual-same-primary", "unconfigured"] as const)(
 		"#given %s ownership #when the real UI opens its picker #then the rendered initial arrow reflects ownership",
 		async (ownership) => {
 			const primary = harness.getModel();
 			if (ownership !== "unconfigured") {
 				await harness.session.setModelPolicy({ models: [{ model: `${primary.provider}/${primary.id}` }] });
-				await harness.session.followModelPolicy();
+				await harness.session.followConfiguredModel();
 			}
 			if (ownership === "manual-other" || ownership === "manual-same-primary") {
 				const manual = ownership === "manual-other" ? harness.getModel("manual") : primary;
@@ -80,7 +80,7 @@ describe("configured policy picker action", () => {
 				.split("\n")
 				.filter((line) => line.startsWith("→ "));
 			expect(selectedRows).toHaveLength(1);
-			if (ownership === "policy") {
+			if (ownership === "configured") {
 				expect(selectedRows[0]).not.toContain(`[${primary.provider}]`);
 			} else {
 				expect(selectedRows[0]).toContain(`${harness.session.model?.id} [${primary.provider}]`);
@@ -95,7 +95,7 @@ describe("configured policy picker action", () => {
 			const refresh = Promise.withResolvers<{ aborted: boolean; errors: Map<string, Error> }>();
 			vi.mocked(harness.session.modelRuntime.refresh).mockReturnValue(refresh.promise);
 			const tui = { requestRender: vi.fn() };
-			const onFollowPolicy = vi.fn();
+			const onFollowConfiguredModel = vi.fn();
 			const onSelect = vi.fn();
 			selector = new ModelSelectorComponent(
 				tui,
@@ -107,7 +107,7 @@ describe("configured policy picker action", () => {
 				onSelect,
 				vi.fn(),
 				undefined,
-				{ onFollowPolicy, policyOwned: true },
+				{ onFollowConfiguredModel, configuredOwned: true },
 			);
 			const selectedRow = () =>
 				text()
@@ -126,7 +126,7 @@ describe("configured policy picker action", () => {
 			}
 			expect(selectedRow()).toBe(policyRow);
 			selector.handleInput("\r");
-			expect(onFollowPolicy).toHaveBeenCalledOnce();
+			expect(onFollowConfiguredModel).toHaveBeenCalledOnce();
 			expect(onSelect).not.toHaveBeenCalled();
 		},
 		5_000,
@@ -144,7 +144,7 @@ describe("configured policy picker action", () => {
 			vi.mocked(harness.session.modelRuntime.refresh).mockReturnValue(refresh.promise);
 			const tui = { requestRender: vi.fn() };
 			const onSelect = vi.fn();
-			const onFollowPolicy = vi.fn();
+			const onFollowConfiguredModel = vi.fn();
 			selector = new ModelSelectorComponent(
 				tui,
 				harness.getModel(),
@@ -154,7 +154,7 @@ describe("configured policy picker action", () => {
 				onSelect,
 				vi.fn(),
 				undefined,
-				{ onFollowPolicy, policyOwned: true },
+				{ onFollowConfiguredModel, configuredOwned: true },
 			);
 			selector.handleInput(arrow);
 			const expectedModel = arrow === "\x1b[B" ? harness.getModel("manual") : harness.getModel();
@@ -174,20 +174,20 @@ describe("configured policy picker action", () => {
 			expect(selectedRow()).toContain(`${expectedModel?.id} [${expectedModel?.provider}]`);
 			selector.handleInput("\r");
 			expect(onSelect).toHaveBeenCalledExactlyOnceWith(expectedModel);
-			expect(onFollowPolicy).not.toHaveBeenCalled();
+			expect(onFollowConfiguredModel).not.toHaveBeenCalled();
 		},
 		5_000,
 	);
 
 	it("#given a policy #when searching and selecting its action #then no model default or favorite is written", () => {
-		const onFollowPolicy = vi.fn();
-		const { onSelect, onFavoriteChange } = open(onFollowPolicy);
+		const onFollowConfiguredModel = vi.fn();
+		const { onSelect, onFavoriteChange } = open(onFollowConfiguredModel);
 		const saveDefault = vi.spyOn(harness.settingsManager, "setDefaultModelAndProvider");
-		selector?.handleInput("policy");
+		selector?.handleInput("configured");
 		expect(text()).toMatch(/^→ {3}\S[^\n]*$/m);
 		selector?.handleInput("\x06");
 		selector?.handleInput("\r");
-		expect(onFollowPolicy).toHaveBeenCalledOnce();
+		expect(onFollowConfiguredModel).toHaveBeenCalledOnce();
 		expect(onSelect).not.toHaveBeenCalled();
 		expect(onFavoriteChange).not.toHaveBeenCalled();
 		expect(saveDefault).not.toHaveBeenCalled();
@@ -208,38 +208,38 @@ describe("configured policy picker action", () => {
 
 	it("#given no policy #when searching policy #then no action is available", () => {
 		const { onSelect } = open();
-		selector?.handleInput("policy");
+		selector?.handleInput("configured");
 		selector?.handleInput("\r");
 		expect(text()).not.toMatch(/^→ /m);
 		expect(onSelect).not.toHaveBeenCalled();
 	});
 
 	it("#given a current model #when navigating up #then the action is selectable and wraps back to models", () => {
-		const onFollowPolicy = vi.fn();
-		const { onSelect } = open(onFollowPolicy);
+		const onFollowConfiguredModel = vi.fn();
+		const { onSelect } = open(onFollowConfiguredModel);
 		selector?.handleInput("\x1b[A");
 		expect(text()).toMatch(/^→ {3}\S[^\n]*$/m);
 		selector?.handleInput("\x1b[A");
 		selector?.handleInput("\r");
 		expect(onSelect).toHaveBeenCalledExactlyOnceWith(harness.getModel("manual"));
-		expect(onFollowPolicy).not.toHaveBeenCalled();
+		expect(onFollowConfiguredModel).not.toHaveBeenCalled();
 	});
 
 	it("#given a narrowed catalog #when switching scope with a policy search #then the action remains selectable", () => {
-		const onFollowPolicy = vi.fn();
-		open(onFollowPolicy, true);
-		selector?.handleInput("policy");
+		const onFollowConfiguredModel = vi.fn();
+		open(onFollowConfiguredModel, true);
+		selector?.handleInput("configured");
 		selector?.handleInput("\t");
 		selector?.handleInput("\r");
-		expect(onFollowPolicy).toHaveBeenCalledOnce();
+		expect(onFollowConfiguredModel).toHaveBeenCalledOnce();
 	});
 
 	it("#given an in-flight catalog refresh #when it finishes #then the searched action survives", async () => {
 		const refresh = Promise.withResolvers<{ aborted: boolean; errors: Map<string, Error> }>();
 		vi.mocked(harness.session.modelRuntime.refresh).mockReturnValue(refresh.promise);
 		const tui = { requestRender: vi.fn() };
-		const onFollowPolicy = vi.fn();
-		const options = { onFollowPolicy };
+		const onFollowConfiguredModel = vi.fn();
+		const options = { onFollowConfiguredModel };
 		selector = new ModelSelectorComponent(
 			tui,
 			harness.getModel(),
@@ -248,7 +248,7 @@ describe("configured policy picker action", () => {
 			[],
 			vi.fn(),
 			vi.fn(),
-			"policy",
+			"configured",
 			options,
 		);
 		// Subscribe to the post-refresh render, not the constructor's initial render.
@@ -257,26 +257,26 @@ describe("configured policy picker action", () => {
 		refresh.resolve({ aborted: false, errors: new Map() });
 		await completed.promise;
 		selector.handleInput("\r");
-		expect(onFollowPolicy).toHaveBeenCalledOnce();
+		expect(onFollowConfiguredModel).toHaveBeenCalledOnce();
 	}, 5_000);
 
 	it.each([40, 80, 120])(
 		"#given width %i #when rendering the action #then it stays within terminal columns",
 		(width) => {
 			open(vi.fn());
-			selector?.handleInput("policy");
+			selector?.handleInput("configured");
 			expect(text()).toMatch(/^→ {3}\S[^\n]*$/m);
 			for (const line of selector?.render(width) ?? []) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 		},
 	);
 
 	it("#given a policy action #when cancelling #then it does not follow policy", () => {
-		const onFollowPolicy = vi.fn();
-		const { onCancel } = open(onFollowPolicy);
-		selector?.handleInput("policy");
+		const onFollowConfiguredModel = vi.fn();
+		const { onCancel } = open(onFollowConfiguredModel);
+		selector?.handleInput("configured");
 		selector?.handleInput("\x1b");
 		expect(onCancel).toHaveBeenCalledOnce();
-		expect(onFollowPolicy).not.toHaveBeenCalled();
+		expect(onFollowConfiguredModel).not.toHaveBeenCalled();
 	});
 
 	it.each([true, false])(
@@ -306,13 +306,13 @@ describe("configured policy picker action", () => {
 				showError: vi.fn(),
 			};
 			Object.setPrototypeOf(host, InteractiveMode.prototype);
-			const follow = vi.spyOn(harness.session, "followModelPolicy");
+			const follow = vi.spyOn(harness.session, "followConfiguredModel");
 			const saveDefault = vi.spyOn(harness.settingsManager, "setDefaultModelAndProvider");
 			Reflect.apply(Reflect.get(InteractiveMode.prototype, "showModelSelector"), host, []);
 			const component = editorContainer.children[0];
 			if (!(component instanceof ModelSelectorComponent)) throw new Error("real picker missing");
 			selector = component;
-			component.handleInput("policy");
+			component.handleInput("configured");
 			component.handleInput("\r");
 			if (configured) {
 				expect(follow).toHaveBeenCalledOnce();

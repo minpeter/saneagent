@@ -22,12 +22,12 @@ interface ScopedModelItem {
 	thinkingLevel?: string;
 }
 
-interface PolicyAction {
+interface ConfiguredAction {
 	readonly label: string;
 	readonly onSelect: () => void;
 }
 
-type SelectorItem = ModelItem | PolicyAction;
+type SelectorItem = ModelItem | ConfiguredAction;
 
 type ModelScope = "all" | "narrowed";
 type ModelSelectorTui = Pick<TUI, "requestRender"> & { terminal?: { rows: number } };
@@ -43,8 +43,8 @@ export interface ModelSelectorFavoriteOptions {
 }
 
 export interface ModelSelectorOptions extends ModelSelectorFavoriteOptions {
-	readonly onFollowPolicy?: () => void;
-	readonly policyOwned?: boolean;
+	readonly onFollowConfiguredModel?: () => void;
+	readonly configuredOwned?: boolean;
 }
 
 /** Component that renders a model selector with search. */
@@ -65,8 +65,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private scopedModelItems: ModelItem[] = [];
 	private activeModels: ModelItem[] = [];
 	private filteredModels: SelectorItem[] = [];
-	private readonly policyAction?: PolicyAction;
-	private readonly policyOwned: boolean;
+	private readonly configuredAction?: ConfiguredAction;
+	private readonly configuredOwned: boolean;
 	private selectedIndex: number = 0;
 	private currentModel?: Model<any>;
 	private settingsManager: SettingsManager;
@@ -115,9 +115,9 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.favoriteIds = favorites?.favoriteModelIds === null ? null : [...(favorites?.favoriteModelIds ?? [])];
 		this.favoriteIdsAtOpen = this.favoriteIds === null ? null : [...this.favoriteIds];
 		this.onFavoriteChangeCallback = favorites?.onFavoriteChange;
-		this.policyOwned = favorites?.policyOwned ?? false;
-		this.policyAction = favorites?.onFollowPolicy
-			? { label: "Use configured model policy", onSelect: favorites.onFollowPolicy }
+		this.configuredOwned = favorites?.configuredOwned ?? false;
+		this.configuredAction = favorites?.onFollowConfiguredModel
+			? { label: "Use configured model", onSelect: favorites.onFollowConfiguredModel }
 			: undefined;
 
 		// Add top border
@@ -201,12 +201,12 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			return refreshed ? [refreshed] : [];
 		});
 		this.activeModels = this.scope === "narrowed" ? this.scopedModelItems : this.allModels;
-		this.filteredModels = this.policyAction ? [this.policyAction, ...this.activeModels] : this.activeModels;
+		this.filteredModels = this.configuredAction ? [this.configuredAction, ...this.activeModels] : this.activeModels;
 		const currentIndex = this.filteredModels.findIndex(
 			(item) => "model" in item && modelsAreEqual(this.currentModel, item.model),
 		);
 		this.selectedIndex =
-			this.policyOwned && this.policyAction
+			this.configuredOwned && this.configuredAction
 				? 0
 				: currentIndex >= 0
 					? currentIndex
@@ -302,7 +302,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.scope = scope;
 		this.activeModels = this.scope === "narrowed" ? this.scopedModelItems : this.allModels;
 		const currentIndex = this.activeModels.findIndex((item) => modelsAreEqual(this.currentModel, item.model));
-		this.selectedIndex = currentIndex >= 0 ? currentIndex + (this.policyAction ? 1 : 0) : 0;
+		this.selectedIndex = currentIndex >= 0 ? currentIndex + (this.configuredAction ? 1 : 0) : 0;
 		this.filterModels(this.searchInput.getValue(), selectedItem);
 		if (this.scopeText) {
 			this.scopeText.setText(this.getScopeText());
@@ -321,8 +321,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 					},
 				)
 			: this.activeModels;
-		if (this.policyAction?.label.toLowerCase().includes(query.trim().toLowerCase())) {
-			this.filteredModels = [this.policyAction, ...this.filteredModels];
+		if (this.configuredAction?.label.toLowerCase().includes(query.trim().toLowerCase())) {
+			this.filteredModels = [this.configuredAction, ...this.filteredModels];
 		}
 		// When filtering by a query, move the selector to the top row so the best
 		// match is highlighted. When the query is cleared, keep the current position
@@ -363,7 +363,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			const isSelected = i === this.selectedIndex;
 			if (!("model" in item)) {
 				// Reserve the favorite-marker column so this action aligns with model IDs.
-				const checkmark = this.policyOwned ? theme.fg("success", " ✓") : "";
+				const checkmark = this.configuredOwned ? theme.fg("success", " ✓") : "";
 				const line = isSelected ? theme.fg("accent", `→   ${item.label}`) + checkmark : `    ${item.label}${checkmark}`;
 				this.listContainer.addChild(new Text(line, 0, 0));
 				continue;
@@ -378,12 +378,12 @@ export class ModelSelectorComponent extends Container implements Focusable {
 				const prefix = theme.fg("accent", "→ ");
 				const modelText = `${favoriteMarker}${theme.fg("accent", item.id)}`;
 				const providerBadge = theme.fg("muted", `[${item.provider}]`);
-			const checkmark = isCurrent && !this.policyOwned ? theme.fg("success", " ✓") : "";
+			const checkmark = isCurrent && !this.configuredOwned ? theme.fg("success", " ✓") : "";
 				line = `${prefix}${modelText} ${providerBadge}${checkmark}`;
 			} else {
 				const modelText = `  ${favoriteMarker}${item.id}`;
 				const providerBadge = theme.fg("muted", `[${item.provider}]`);
-				const checkmark = isCurrent && !this.policyOwned ? theme.fg("success", " ✓") : "";
+				const checkmark = isCurrent && !this.configuredOwned ? theme.fg("success", " ✓") : "";
 				line = `${modelText} ${providerBadge}${checkmark}`;
 			}
 
@@ -411,7 +411,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			const description =
 				"model" in selected
 					? `  Model Name: ${selected.model.name}`
-					: "  Return model selection to the configured policy.";
+					: "  Return model selection to the configured model order and fallback chain.";
 			this.listContainer.addChild(new Text(theme.fg("muted", description), 0, 0));
 		}
 		if (this.refreshStatusMessage) {

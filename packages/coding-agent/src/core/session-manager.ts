@@ -127,7 +127,7 @@ export interface ModelChangeEntry extends SessionEntryBase {
 	originalProvider?: string;
 	originalModelId?: string;
 	/** Exact selection intent; omitted by legacy histories. Machine switches do not claim ownership. */
-	selectionIntent?: "policy" | "manual" | "programmatic";
+	selectionIntent?: "configured" | "manual" | "programmatic";
 }
 
 export interface CompactionEntry<T = unknown> extends SessionEntryBase {

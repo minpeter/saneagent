@@ -13,7 +13,7 @@ import { createHarness, type Harness } from "./harness.ts";
  * takes it; machine events (a programmatic switch by a builtin extension, a fallback window) must
  * never transfer ownership, and the user must be able to hand it back without losing the session.
  */
-describe("model policy ownership", () => {
+describe("configured model ownership", () => {
 	const harnesses: Harness[] = [];
 	const sessions: AgentSession[] = [];
 	afterEach(() => {
@@ -43,7 +43,7 @@ describe("model policy ownership", () => {
 						sources.push(event.source);
 					});
 					api.on("session_start", async (_event, ctx) => {
-						if (!ctx.sessionSettings.setModelPolicy) throw new Error("Session model policy API is missing");
+						if (!ctx.sessionSettings.setModelPolicy) throw new Error("Session configured model API is missing");
 						await ctx.sessionSettings.setModelPolicy(policy);
 					});
 				},
@@ -140,7 +140,7 @@ describe("model policy ownership", () => {
 
 		// The return path must work on the CURRENTLY loaded policy, without a config change: an
 		// identical re-push early-returns, so this cannot be "flip the flag and push again".
-		await session.followModelPolicy();
+		await session.followConfiguredModel();
 		expect(session.model?.id).toBe("faux-2");
 		expect(session.thinkingLevel).toBe("high");
 	});
@@ -149,7 +149,7 @@ describe("model policy ownership", () => {
 		const h2 = await setup();
 		const { h, session, changePolicy } = h2;
 		await session.setSessionModel(h.models[2]);
-		await session.followModelPolicy();
+		await session.followConfiguredModel();
 		changePolicy({ models: [{ model: "faux/faux-1" }] });
 		await session.reload();
 		expect(session.model?.id).toBe("faux-1");
@@ -161,7 +161,7 @@ describe("model policy ownership", () => {
 		await session.setSessionModel(h.models[2]);
 		changePolicy(undefined);
 		await session.reload();
-		await expect(session.followModelPolicy()).rejects.toThrow();
+		await expect(session.followConfiguredModel()).rejects.toThrow();
 		expect(session.model?.id).toBe("faux-3");
 	});
 
@@ -170,7 +170,7 @@ describe("model policy ownership", () => {
 		const { session } = h2;
 		// A resumed session deliberately starts unowned by the policy (the restored pick wins).
 		expect(session.model?.id).toBe("faux-3");
-		await session.followModelPolicy();
+		await session.followConfiguredModel();
 		expect(session.model?.id).toBe("faux-2");
 	});
 
@@ -181,7 +181,7 @@ describe("model policy ownership", () => {
 		await session.cycleModel();
 		// Cycling is a deliberate pick, so it must take the slot away from the policy.
 		expect(session.model?.id).not.toBe("faux-2");
-		await session.followModelPolicy();
+		await session.followConfiguredModel();
 		expect(session.model?.id).toBe("faux-2");
 		expect(h.models.length).toBe(3);
 	});
@@ -190,7 +190,7 @@ describe("model policy ownership", () => {
 		const h2 = await setup();
 		const { h, session, sources } = h2;
 		// Startup application of the declared policy.
-		expect(sources).toContain("policy");
+		expect(sources).toContain("configured");
 		expect(sources).not.toContain("restore");
 
 		// Returning to the policy is also policy provenance, not a history restore.
@@ -198,8 +198,8 @@ describe("model policy ownership", () => {
 		await session.setSessionModel(h.models[2]);
 		expect(sources).toContain("set");
 		sources.length = 0;
-		await session.followModelPolicy();
-		expect(sources).toEqual(["policy"]);
+		await session.followConfiguredModel();
+		expect(sources).toEqual(["configured"]);
 	});
 
 	it("#given a resumed session #when history restores the model #then the source is still restore", async () => {
@@ -207,31 +207,31 @@ describe("model policy ownership", () => {
 		const { session, sources } = h2;
 		expect(session.model?.id).toBe("faux-3");
 		// A history restore must keep its own provenance; only policy paths get the new value.
-		expect(sources).not.toContain("policy");
+		expect(sources).not.toContain("configured");
 	});
 
-	it("#given the /model policy route #when a policy is configured #then the routed action reapplies it", async () => {
+	it("#given the /model configured route #when a policy is configured #then the routed action reapplies it", async () => {
 		const h2 = await setup();
 		const { h, session } = h2;
 		await session.setSessionModel(h.models[2]);
 		expect(session.model?.id).toBe("faux-3");
 
 		// Drive the real routing decision the TUI uses, then perform what it resolved to.
-		const action = resolveModelCommandAction("policy", { hasPolicy: session.hasModelPolicy });
-		expect(action).toEqual({ kind: "follow-policy" });
-		if (action.kind === "follow-policy") await session.followModelPolicy();
+		const action = resolveModelCommandAction("configured", { hasConfiguredModel: session.hasConfiguredModel });
+		expect(action).toEqual({ kind: "follow-configured" });
+		if (action.kind === "follow-configured") await session.followConfiguredModel();
 		expect(session.model?.id).toBe("faux-2");
 	});
 
-	it("#given no policy #when the /model policy route is resolved #then it reports without switching", async () => {
+	it("#given no policy #when the /model configured route is resolved #then it reports without switching", async () => {
 		const h2 = await setup();
 		const { h, session, changePolicy } = h2;
 		await session.setSessionModel(h.models[2]);
 		changePolicy(undefined);
 		await session.reload();
-		expect(session.hasModelPolicy).toBe(false);
+		expect(session.hasConfiguredModel).toBe(false);
 
-		const action = resolveModelCommandAction("policy", { hasPolicy: session.hasModelPolicy });
+		const action = resolveModelCommandAction("configured", { hasConfiguredModel: session.hasConfiguredModel });
 		expect(action.kind).toBe("error");
 		// Nothing was switched by merely asking.
 		expect(session.model?.id).toBe("faux-3");
@@ -251,13 +251,13 @@ describe("model policy ownership", () => {
 		// Swap the loaded policy for one nothing can authenticate. The manual pick already took the
 		// slot, so this push does not try to select - it just becomes the policy we would return to.
 		await session.setModelPolicy({ models: [{ model: "unauthed/only" }] });
-		expect(session.hasModelPolicy).toBe(true);
+		expect(session.hasConfiguredModel).toBe(true);
 
 		// The route still offers the action, and applying it must fail loudly without switching.
-		expect(resolveModelCommandAction("policy", { hasPolicy: session.hasModelPolicy })).toEqual({
-			kind: "follow-policy",
+		expect(resolveModelCommandAction("configured", { hasConfiguredModel: session.hasConfiguredModel })).toEqual({
+			kind: "follow-configured",
 		});
-		await expect(session.followModelPolicy()).rejects.toThrow();
+		await expect(session.followConfiguredModel()).rejects.toThrow();
 		expect(session.model?.id).toBe("faux-3");
 	});
 });

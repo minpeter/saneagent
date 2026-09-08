@@ -225,10 +225,10 @@ export class FooterComponent implements Component {
 		// Model label pinned to the right edge; the provider prefix stays only when
 		// the full line fits.
 		const modelName = state.model?.id || "no-model";
-		const isPolicyModel = (this.modelSelectSource ?? this.session.modelSelectSource) === "policy";
+		const isConfiguredModel = (this.modelSelectSource ?? this.session.modelSelectSource) === "configured";
 		const fastIndicator = this.session.isFastModeActive() ? FAST_MODE_INDICATOR : "";
-		const policyModelPrefix = isPolicyModel && state.model ? `(policy) ${state.model.provider}/` : "";
-		let minimalRight = `${policyModelPrefix}${fastIndicator}${modelName}`;
+		const configuredModelPrefix = isConfiguredModel && state.model ? `(configured) ${state.model.provider}/` : "";
+		let minimalRight = `${configuredModelPrefix}${fastIndicator}${modelName}`;
 		if (state.model?.reasoning) {
 			const thinkingLevel = state.thinkingLevel || "off";
 			minimalRight = thinkingLevel === "off" ? `${minimalRight}:off` : `${minimalRight}:${thinkingLevel}`;
@@ -246,7 +246,7 @@ export class FooterComponent implements Component {
 			}
 		}
 		const providerPrefix =
-			!isPolicyModel && (this.footerData.getAvailableProviderCount() > 1 || accountSuffix !== "") && state.model
+			!isConfiguredModel && (this.footerData.getAvailableProviderCount() > 1 || accountSuffix !== "") && state.model
 				? `(${state.model.provider}${accountSuffix}) `
 				: "";
 		const full: FooterSegment | undefined = providerPrefix

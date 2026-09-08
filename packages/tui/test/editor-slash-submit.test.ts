@@ -6,7 +6,7 @@ import { TuiMainScreen } from "../src/tui-main-screen.ts";
 import { defaultEditorTheme } from "./test-themes.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
-it("submits /model policy literally while command-name autocomplete is still active", { timeout: 2000 }, async () => {
+it("submits /model configured literally while command-name autocomplete is still active", { timeout: 2000 }, async () => {
 	const tui = new TuiMainScreen(new VirtualTerminal(80, 24));
 	const editor = new Editor(tui, defaultEditorTheme);
 	let rendered!: () => void;
@@ -39,7 +39,7 @@ it("submits /model policy literally while command-name autocomplete is still act
 	editor.handleInput(" policy");
 	assert.equal(editor.isShowingAutocomplete(), true);
 	editor.handleInput("\r");
-	assert.equal(submitted, "/model policy");
+	assert.equal(submitted, "/model configured");
 	assert.equal(completions, 0);
 });
 

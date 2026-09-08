@@ -40,7 +40,7 @@ describe("policy selection across session restart", () => {
 					(pi) => {
 						api = pi;
 						pi.on("session_start", async (_event, ctx) => {
-							if (!ctx.sessionSettings.setModelPolicy) throw new Error("Session model policy API is missing");
+							if (!ctx.sessionSettings.setModelPolicy) throw new Error("Session configured model API is missing");
 							await ctx.sessionSettings.setModelPolicy({
 								models: [{ model: `faux/${primary}`, thinkingLevel: "high" }],
 							});
@@ -95,7 +95,7 @@ describe("policy selection across session restart", () => {
 		const resumed = await restart();
 		// Then the deliberate cycle is not replaced by the policy.
 		expect(resumed.model?.id).toBe("ordinary");
-		expect(footer(resumed)).not.toContain("(policy)");
+		expect(footer(resumed)).not.toContain("(configured)");
 	});
 
 	it("treats legacy history without intent as an override, without model equality guessing", async () => {
@@ -107,7 +107,7 @@ describe("policy selection across session restart", () => {
 		const resumed = await restart();
 		// Then absent provenance is not silently migrated to policy ownership.
 		expect(resumed.model?.id).toBe("primary");
-		expect(footer(resumed)).not.toContain("(policy)");
+		expect(footer(resumed)).not.toContain("(configured)");
 	});
 
 	function footer(session: AgentSession) {
@@ -125,17 +125,17 @@ describe("policy selection across session restart", () => {
 		// When a footer is constructed after binding, as on startup.
 		const rendered = footer(session);
 		// Then the label reflects current session state, not a missed event.
-		expect(rendered).toContain("(policy) faux/primary:high");
+		expect(rendered).toContain("(configured) faux/primary:high");
 	});
 
 	it("restores policy ownership and tuning from a reopened session after returning to policy", async () => {
 		const { h, session, restart, settings } = await setup();
 		await session.setSessionModel(h.models[0]);
-		await session.followModelPolicy();
+		await session.followConfiguredModel();
 		const resumed = await restart();
 		expect(resumed.model?.id).toBe("primary");
 		expect(resumed.thinkingLevel).toBe("high");
-		expect(footer(resumed)).toContain("(policy) faux/primary:high");
+		expect(footer(resumed)).toContain("(configured) faux/primary:high");
 		expect(settings.getDefaultModel()).toBe("ordinary");
 		expect(settings.getDefaultThinkingLevel()).toBe("low");
 	});
@@ -157,7 +157,7 @@ describe("policy selection across session restart", () => {
 		const resumed = await restart();
 		await resumed.reload();
 		expect(resumed.model?.id).toBe(id);
-		expect(footer(resumed)).not.toContain("(policy)");
+		expect(footer(resumed)).not.toContain("(configured)");
 	});
 
 	it("does not persist a programmatic pi.setModel as a deliberate override", async () => {
@@ -184,7 +184,7 @@ describe("policy selection across session restart", () => {
 		try {
 			const component = new FooterComponent(session, data);
 			component.setSession(h.session);
-			expect(component.render(180).map(stripAnsi).join("\n")).not.toContain("(policy)");
+			expect(component.render(180).map(stripAnsi).join("\n")).not.toContain("(configured)");
 		} finally {
 			data.dispose();
 		}

@@ -338,7 +338,7 @@ export interface ExtensionSessionSettings {
 	 * override without discarding the conversation. Rejects when no policy is configured or none of
 	 * its models has configured auth, leaving the active model untouched.
 	 */
-	followModelPolicy?(): Promise<void>;
+	followConfiguredModel?(): Promise<void>;
 	getRetryFallbackSettings(): RetryFallbackSettings;
 	setFallbackChain(key: string, entries: readonly string[]): Promise<void>;
 	removeFallbackChain(key: string): Promise<void>;
@@ -1165,7 +1165,7 @@ export interface ToolExecutionEndEvent {
  * which means the model was restored from session history: a consumer showing where the current
  * model came from must be able to tell a configured chain from a resumed conversation.
  */
-export type ModelSelectSource = "set" | "cycle" | "policy" | "restore" | "fallback" | "fallback-revert";
+export type ModelSelectSource = "set" | "cycle" | "configured" | "restore" | "fallback" | "fallback-revert";
 
 /** Fired when a new model is selected */
 export interface ModelSelectEvent {

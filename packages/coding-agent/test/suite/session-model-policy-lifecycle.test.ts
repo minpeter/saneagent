@@ -6,7 +6,7 @@ import { SettingsManager } from "../../src/core/settings-manager.ts";
 import { createTestExtensionsResult, createTestResourceLoader } from "../utilities.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
-describe("model policy selection lifecycle", () => {
+describe("configured model selection lifecycle", () => {
 	const harnesses: Harness[] = [];
 	const sessions: AgentSession[] = [];
 	afterEach(() => {
@@ -32,7 +32,7 @@ describe("model policy selection lifecycle", () => {
 				(pi) => {
 					pi.on("session_start", async (_event, ctx) => {
 						if (!enabled) return;
-						if (!ctx.sessionSettings.setModelPolicy) throw new Error("Session model policy API is missing");
+						if (!ctx.sessionSettings.setModelPolicy) throw new Error("Session configured model API is missing");
 						await ctx.sessionSettings.setModelPolicy(policy);
 					});
 				},

@@ -4727,8 +4727,8 @@ export class AgentSession {
 					persistDefault: false,
 					appendSessionEntry: true,
 					emitModelSelect: true,
-					modelSelectSource: "policy",
-					selectionIntent: "policy",
+					modelSelectSource: "configured",
+					selectionIntent: "configured",
 					invalidateCompaction: true,
 					ephemeralThinkingLevel: primary.thinkingLevel,
 				});
@@ -4748,12 +4748,12 @@ export class AgentSession {
 	}
 
 	/** Whether a declared session model policy exists, so a UI can offer the return action. */
-	get hasModelPolicy(): boolean {
+	get hasConfiguredModel(): boolean {
 		return this._modelPolicy !== undefined;
 	}
 
 	/** Whether the declared policy currently owns model selection. */
-	get isModelPolicyOwned(): boolean {
+	get isConfiguredModelOwned(): boolean {
 		return this._modelPolicy !== undefined && this._modelPolicySelectionAllowed;
 	}
 
@@ -4766,7 +4766,7 @@ export class AgentSession {
 	 * here, since the user wants the chain they already configured. It also must not go through
 	 * setModel, which would persist defaults and immediately surrender ownership again.
 	 */
-	async followModelPolicy(): Promise<SystemPromptChangeEvent | undefined> {
+	async followConfiguredModel(): Promise<SystemPromptChangeEvent | undefined> {
 		const policy = this._modelPolicy;
 		if (!policy) throw new Error("No session model policy is configured");
 		const primary = policy.models.find(({ model }) => this._modelRuntime.hasConfiguredAuth(model.provider));
@@ -4783,8 +4783,8 @@ export class AgentSession {
 			persistDefault: false,
 			appendSessionEntry: true,
 			emitModelSelect: true,
-			modelSelectSource: "policy",
-			selectionIntent: "policy",
+			modelSelectSource: "configured",
+			selectionIntent: "configured",
 			invalidateCompaction: true,
 			ephemeralThinkingLevel: primary.thinkingLevel,
 		});
@@ -4851,7 +4851,7 @@ export class AgentSession {
 			entryReason?: "fallback" | "fallback-revert";
 			emitModelSelect: boolean;
 			modelSelectSource: ModelSelectSource;
-			selectionIntent?: "policy" | "manual" | "programmatic";
+			selectionIntent?: "configured" | "manual" | "programmatic";
 			invalidateCompaction: boolean;
 			ephemeralThinkingLevel?: ThinkingLevel;
 		},
@@ -4905,8 +4905,8 @@ export class AgentSession {
 					opts.selectionIntent,
 				);
 			}
-			if (opts.selectionIntent === "policy" || opts.selectionIntent === "manual") {
-				this._modelPolicySelectionAllowed = opts.selectionIntent === "policy";
+			if (opts.selectionIntent === "configured" || opts.selectionIntent === "manual") {
+				this._modelPolicySelectionAllowed = opts.selectionIntent === "configured";
 			}
 			if (opts.persistDefault) this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
 			// Emit only after all admission hooks have accepted the candidate.
@@ -7160,8 +7160,8 @@ export class AgentSession {
 				sessionSettings: {
 					getRetryFallbackSettings: () => this.getRetryFallbackSettings(),
 					setModelPolicy: (policy) => this.setModelPolicy(policy),
-					followModelPolicy: async () => {
-						await this.followModelPolicy();
+					followConfiguredModel: async () => {
+						await this.followConfiguredModel();
 					},
 					setFallbackChain: async (key, entries) => {
 						this.settingsManager.setFallbackChain(key, [...entries]);

@@ -7,30 +7,34 @@ import { resolveModelCommandAction } from "../../src/core/model-command-action.t
  */
 describe("model command action", () => {
 	it("#given the policy term #when a policy is configured #then it routes to the return action", () => {
-		expect(resolveModelCommandAction("policy", { hasPolicy: true })).toEqual({ kind: "follow-policy" });
+		expect(resolveModelCommandAction("configured", { hasConfiguredModel: true })).toEqual({ kind: "follow-configured" });
 		// Case and surrounding whitespace are how people actually type it.
-		expect(resolveModelCommandAction("  Policy  ", { hasPolicy: true })).toEqual({ kind: "follow-policy" });
+		expect(resolveModelCommandAction("  Configured  ", { hasConfiguredModel: true })).toEqual({ kind: "follow-configured" });
 	});
 
 	it("#given the policy term #when no policy is configured #then it reports instead of searching", () => {
-		expect(resolveModelCommandAction("policy", { hasPolicy: false })).toEqual({
+		expect(resolveModelCommandAction("configured", { hasConfiguredModel: false })).toEqual({
 			kind: "error",
-			message: "No model policy is configured for this session.",
+			message: "No configured model is available for this session.",
 		});
 	});
 
 	it("#given no argument #when resolving #then it opens the selector", () => {
-		expect(resolveModelCommandAction(undefined, { hasPolicy: true })).toEqual({ kind: "open-selector" });
-		expect(resolveModelCommandAction("", { hasPolicy: true })).toEqual({ kind: "open-selector" });
+		expect(resolveModelCommandAction(undefined, { hasConfiguredModel: true })).toEqual({ kind: "open-selector" });
+		expect(resolveModelCommandAction("", { hasConfiguredModel: true })).toEqual({ kind: "open-selector" });
 	});
 
 	it("#given a model reference #when resolving #then it stays a model search", () => {
-		expect(resolveModelCommandAction("faux/faux-1", { hasPolicy: true })).toEqual({
+		expect(resolveModelCommandAction("faux/faux-1", { hasConfiguredModel: true })).toEqual({
 			kind: "search",
 			searchTerm: "faux/faux-1",
 		});
+		expect(resolveModelCommandAction("policy", { hasConfiguredModel: true })).toEqual({
+			kind: "search",
+			searchTerm: "policy",
+		});
 		// A model whose name merely contains the term must not be hijacked.
-		expect(resolveModelCommandAction("policy-tuned-v2", { hasPolicy: true })).toEqual({
+		expect(resolveModelCommandAction("policy-tuned-v2", { hasConfiguredModel: true })).toEqual({
 			kind: "search",
 			searchTerm: "policy-tuned-v2",
 		});

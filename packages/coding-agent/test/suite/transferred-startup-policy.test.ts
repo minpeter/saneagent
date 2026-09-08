@@ -48,12 +48,12 @@ describe("transferred startup policy integration", () => {
 	it("fresh startup selects the policy primary", async () => {
 		const session = await open("fresh");
 		expect(session.model?.id).toBe("primary");
-		expect(session.isModelPolicyOwned).toBe(true);
+		expect(session.isConfiguredModelOwned).toBe(true);
 	});
 	it("settings enabledModels does not disarm policy", async () => {
 		const session = await open("enabled");
 		expect(session.model?.id).toBe("primary");
-		expect(session.isModelPolicyOwned).toBe(true);
+		expect(session.isConfiguredModelOwned).toBe(true);
 		expect(session.settingsManager.getDefaultModel()).toBe("ordinary");
 		expect(session.settingsManager.getEnabledModels()).toEqual(["faux/ordinary", "faux/primary"]);
 	});
@@ -65,18 +65,18 @@ describe("transferred startup policy integration", () => {
 	it("empty-message durable manual intent survives policy binding", async () => {
 		const session = await open("manual");
 		expect(session.model?.id).toBe("manual");
-		expect(session.isModelPolicyOwned).toBe(false);
+		expect(session.isConfiguredModelOwned).toBe(false);
 		expect(session.sessionManager.getBranch().filter((entry) => entry.type === "model_change")).toMatchObject([
 			{ modelId: "manual", selectionIntent: "manual" },
 		]);
 		await session.reload();
 		expect(session.model?.id).toBe("manual");
-		expect(session.isModelPolicyOwned).toBe(false);
+		expect(session.isConfiguredModelOwned).toBe(false);
 		expect(session.settingsManager.getDefaultModel()).toBe("ordinary");
 	});
 	it.each(["cli", "scoped"] as const)("preserves explicit %s options", async (kind) => {
 		const session = await open(kind);
 		expect(session.model?.id).toBe("ordinary");
-		expect(session.isModelPolicyOwned).toBe(false);
+		expect(session.isConfiguredModelOwned).toBe(false);
 	});
 });
