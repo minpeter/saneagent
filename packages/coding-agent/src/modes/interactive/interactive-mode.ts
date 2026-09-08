@@ -1205,7 +1205,22 @@ export class InteractiveMode {
 						? this.session.scopedModels.map((s) => s.model)
 						: this.session.modelRuntime.getAvailableSnapshot();
 
-				if (models.length === 0) return null;
+				const policyItems = this.session.hasModelPolicy
+					? createFuzzyAutocompleteItems(
+							[
+								{
+									value: "policy",
+									label: "Use configured model policy",
+									description: "Return model selection to the configured policy.",
+								},
+							],
+							prefix,
+							(item) => `${item.value} ${item.label}`,
+							(item) => item,
+						)
+					: null;
+
+				if (models.length === 0) return policyItems;
 
 				// Create items with provider/id format
 				const items = models.map((m) => ({
@@ -1215,11 +1230,12 @@ export class InteractiveMode {
 					label: `${m.provider}/${m.id}`,
 				}));
 
-				return createFuzzyAutocompleteItems(items, prefix, getModelSearchText, (item) => ({
+				const modelItems = createFuzzyAutocompleteItems(items, prefix, getModelSearchText, (item) => ({
 					value: item.label,
 					label: item.id,
 					description: item.provider,
 				}));
+				return policyItems || modelItems ? [...(policyItems ?? []), ...(modelItems ?? [])] : null;
 			};
 		}
 

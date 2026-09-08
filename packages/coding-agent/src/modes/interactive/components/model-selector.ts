@@ -117,7 +117,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.onFavoriteChangeCallback = favorites?.onFavoriteChange;
 		this.policyOwned = favorites?.policyOwned ?? false;
 		this.policyAction = favorites?.onFollowPolicy
-			? { label: "Follow configured policy", onSelect: favorites.onFollowPolicy }
+			? { label: "Use configured model policy", onSelect: favorites.onFollowPolicy }
 			: undefined;
 
 		// Add top border

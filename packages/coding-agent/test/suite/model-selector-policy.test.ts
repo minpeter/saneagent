@@ -184,7 +184,7 @@ describe("configured policy picker action", () => {
 		const { onSelect, onFavoriteChange } = open(onFollowPolicy);
 		const saveDefault = vi.spyOn(harness.settingsManager, "setDefaultModelAndProvider");
 		selector?.handleInput("policy");
-		expect(text()).toContain("→   Follow configured policy");
+		expect(text()).toMatch(/^→ {3}\S[^\n]*$/m);
 		selector?.handleInput("\x06");
 		selector?.handleInput("\r");
 		expect(onFollowPolicy).toHaveBeenCalledOnce();
@@ -195,14 +195,14 @@ describe("configured policy picker action", () => {
 
 	it("#given policy owns the current model #when the picker renders #then policy owns the checkmark", () => {
 		open(vi.fn(), false, true);
-		expect(text()).toContain("→   Follow configured policy");
-		expect(text()).toContain("Follow configured policy ✓");
+		expect(text()).toMatch(/^→ {3}\S[^\n]* ✓[^\S\n]*$/m);
+		expect(text().match(/✓/g)).toHaveLength(1);
 		expect(text()).not.toContain("primary [faux] ✓");
 	});
 
 	it("#given a manual override #when the picker renders #then the model owns the checkmark", () => {
 		open(vi.fn(), false, false);
-		expect(text()).not.toContain("Follow configured policy ✓");
+		expect(text().match(/✓/g)).toHaveLength(1);
 		expect(text()).toContain("primary [faux] ✓");
 	});
 
@@ -210,7 +210,7 @@ describe("configured policy picker action", () => {
 		const { onSelect } = open();
 		selector?.handleInput("policy");
 		selector?.handleInput("\r");
-		expect(text()).not.toContain("Follow configured policy");
+		expect(text()).not.toMatch(/^→ /m);
 		expect(onSelect).not.toHaveBeenCalled();
 	});
 
@@ -218,7 +218,7 @@ describe("configured policy picker action", () => {
 		const onFollowPolicy = vi.fn();
 		const { onSelect } = open(onFollowPolicy);
 		selector?.handleInput("\x1b[A");
-		expect(text()).toContain("→   Follow configured policy");
+		expect(text()).toMatch(/^→ {3}\S[^\n]*$/m);
 		selector?.handleInput("\x1b[A");
 		selector?.handleInput("\r");
 		expect(onSelect).toHaveBeenCalledExactlyOnceWith(harness.getModel("manual"));
@@ -265,7 +265,7 @@ describe("configured policy picker action", () => {
 		(width) => {
 			open(vi.fn());
 			selector?.handleInput("policy");
-			expect(text()).toContain("Follow configured policy");
+			expect(text()).toMatch(/^→ {3}\S[^\n]*$/m);
 			for (const line of selector?.render(width) ?? []) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 		},
 	);

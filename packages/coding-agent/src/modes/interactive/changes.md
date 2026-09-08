@@ -1,3 +1,25 @@
+## 2026-09-08 - Recommend configured policy in model autocomplete
+
+### What changed
+
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`: offer the `policy` action before matching model arguments only when a session policy is configured, including when the catalog is empty. Preserve existing model completions and argument submission semantics.
+- `packages/coding-agent/src/modes/interactive/components/model-selector.ts`: label the action `Use configured model policy`, retaining the description `Return model selection to the configured policy.` and existing ownership, checkmark, alignment, and favorite behavior.
+
+### Why
+
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`: typing `/model policy` in the main editor previously recommended fuzzy model matches rather than the available policy action.
+- `packages/coding-agent/src/modes/interactive/components/model-selector.ts`: the picker should identify the action consistently with the main editor recommendation.
+
+### Why an extension could not handle it
+
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`: the built-in model command owns its argument completion provider.
+- `packages/coding-agent/src/modes/interactive/components/model-selector.ts`: the engine owns the policy action row and its displayed label.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`: `createBaseAutocompleteProvider` model argument completion callback.
+- `packages/coding-agent/src/modes/interactive/components/model-selector.ts`: policy action initialization.
+
 ## 2026-09-08 - Preserve policy picker focus through catalog changes
 
 ### What changed
