@@ -22,6 +22,13 @@ interface ScopedModelItem {
 	thinkingLevel?: string;
 }
 
+interface PolicyAction {
+	readonly label: string;
+	readonly onSelect: () => void;
+}
+
+type SelectorItem = ModelItem | PolicyAction;
+
 type ModelScope = "all" | "narrowed";
 type ModelSelectorTui = Pick<TUI, "requestRender"> & { terminal?: { rows: number } };
 type ModelSelectorSource = ModelRuntime | ModelRegistry;
@@ -35,9 +42,12 @@ export interface ModelSelectorFavoriteOptions {
 	) => void | Promise<void>;
 }
 
-/**
- * Component that renders a model selector with search
- */
+export interface ModelSelectorOptions extends ModelSelectorFavoriteOptions {
+	readonly onFollowPolicy?: () => void;
+	readonly policyOwned?: boolean;
+}
+
+/** Component that renders a model selector with search. */
 export class ModelSelectorComponent extends Container implements Focusable {
 	private searchInput: Input;
 
@@ -54,7 +64,9 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private allModels: ModelItem[] = [];
 	private scopedModelItems: ModelItem[] = [];
 	private activeModels: ModelItem[] = [];
-	private filteredModels: ModelItem[] = [];
+	private filteredModels: SelectorItem[] = [];
+	private readonly policyAction?: PolicyAction;
+	private readonly policyOwned: boolean;
 	private selectedIndex: number = 0;
 	private currentModel?: Model<any>;
 	private settingsManager: SettingsManager;
@@ -88,7 +100,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		onSelect: (model: Model<any>) => void,
 		onCancel: () => void,
 		initialSearchInput?: string,
-		favorites?: ModelSelectorFavoriteOptions,
+		favorites?: ModelSelectorOptions,
 	) {
 		super();
 
@@ -103,6 +115,10 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.favoriteIds = favorites?.favoriteModelIds === null ? null : [...(favorites?.favoriteModelIds ?? [])];
 		this.favoriteIdsAtOpen = this.favoriteIds === null ? null : [...this.favoriteIds];
 		this.onFavoriteChangeCallback = favorites?.onFavoriteChange;
+		this.policyOwned = favorites?.policyOwned ?? false;
+		this.policyAction = favorites?.onFollowPolicy
+			? { label: "Follow configured policy", onSelect: favorites.onFollowPolicy }
+			: undefined;
 
 		// Add top border
 		this.addChild(new DynamicBorder());
@@ -136,7 +152,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.searchInput.onSubmit = () => {
 			// Enter on search input selects the first filtered item
 			if (this.filteredModels[this.selectedIndex]) {
-				this.handleSelect(this.filteredModels[this.selectedIndex].model);
+				this.handleSelect(this.filteredModels[this.selectedIndex]);
 			}
 		};
 		this.addChild(this.searchInput);
@@ -185,10 +201,16 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			return refreshed ? [refreshed] : [];
 		});
 		this.activeModels = this.scope === "narrowed" ? this.scopedModelItems : this.allModels;
-		this.filteredModels = this.activeModels;
-		const currentIndex = this.filteredModels.findIndex((item) => modelsAreEqual(this.currentModel, item.model));
+		this.filteredModels = this.policyAction ? [this.policyAction, ...this.activeModels] : this.activeModels;
+		const currentIndex = this.filteredModels.findIndex(
+			(item) => "model" in item && modelsAreEqual(this.currentModel, item.model),
+		);
 		this.selectedIndex =
-			currentIndex >= 0 ? currentIndex : Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
+			this.policyOwned && this.policyAction
+				? 0
+				: currentIndex >= 0
+					? currentIndex
+					: Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
 	}
 
 	private async refreshModels(): Promise<void> {
@@ -221,8 +243,9 @@ export class ModelSelectorComponent extends Container implements Focusable {
 					this.refreshStatusSuccess = true;
 				}
 			}
+			const selectedItem = this.filteredModels[this.selectedIndex];
 			this.loadModelsFromSnapshot();
-			this.filterModels(this.searchInput.getValue());
+			this.filterModels(this.searchInput.getValue(), selectedItem);
 			this.tui.requestRender();
 		} catch (error) {
 			if (this.closed) return;
@@ -275,17 +298,18 @@ export class ModelSelectorComponent extends Container implements Focusable {
 
 	private setScope(scope: ModelScope): void {
 		if (this.scope === scope) return;
+		const selectedItem = this.filteredModels[this.selectedIndex];
 		this.scope = scope;
 		this.activeModels = this.scope === "narrowed" ? this.scopedModelItems : this.allModels;
 		const currentIndex = this.activeModels.findIndex((item) => modelsAreEqual(this.currentModel, item.model));
-		this.selectedIndex = currentIndex >= 0 ? currentIndex : 0;
-		this.filterModels(this.searchInput.getValue());
+		this.selectedIndex = currentIndex >= 0 ? currentIndex + (this.policyAction ? 1 : 0) : 0;
+		this.filterModels(this.searchInput.getValue(), selectedItem);
 		if (this.scopeText) {
 			this.scopeText.setText(this.getScopeText());
 		}
 	}
 
-	private filterModels(query: string): void {
+	private filterModels(query: string, selectedItem?: SelectorItem): void {
 		this.filteredModels = query
 			? rankModelSearchItems(
 					this.activeModels,
@@ -297,10 +321,21 @@ export class ModelSelectorComponent extends Container implements Focusable {
 					},
 				)
 			: this.activeModels;
+		if (this.policyAction?.label.toLowerCase().includes(query.trim().toLowerCase())) {
+			this.filteredModels = [this.policyAction, ...this.filteredModels];
+		}
 		// When filtering by a query, move the selector to the top row so the best
 		// match is highlighted. When the query is cleared, keep the current position
 		// clamped to the (restored) list length.
 		this.selectedIndex = query ? 0 : Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
+		// Catalog changes retain focus by identity, even when model objects or row order change.
+		// Search edits omit selectedItem so the best match still receives focus.
+		if (selectedItem) {
+			const selectedIndex = this.filteredModels.findIndex((item) =>
+				"model" in selectedItem ? "model" in item && item.fullId === selectedItem.fullId : item === selectedItem,
+			);
+			if (selectedIndex >= 0) this.selectedIndex = selectedIndex;
+		}
 		this.updateList();
 	}
 
@@ -326,6 +361,13 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			if (!item) continue;
 
 			const isSelected = i === this.selectedIndex;
+			if (!("model" in item)) {
+				// Reserve the favorite-marker column so this action aligns with model IDs.
+				const checkmark = this.policyOwned ? theme.fg("success", " ✓") : "";
+				const line = isSelected ? theme.fg("accent", `→   ${item.label}`) + checkmark : `    ${item.label}${checkmark}`;
+				this.listContainer.addChild(new Text(line, 0, 0));
+				continue;
+			}
 			const isCurrent = modelsAreEqual(this.currentModel, item.model);
 			const favoriteMarker = isFavoriteModel(this.favoriteIds, item.fullId)
 				? theme.fg("success", "* ")
@@ -336,12 +378,12 @@ export class ModelSelectorComponent extends Container implements Focusable {
 				const prefix = theme.fg("accent", "→ ");
 				const modelText = `${favoriteMarker}${theme.fg("accent", item.id)}`;
 				const providerBadge = theme.fg("muted", `[${item.provider}]`);
-				const checkmark = isCurrent ? theme.fg("success", " ✓") : "";
+			const checkmark = isCurrent && !this.policyOwned ? theme.fg("success", " ✓") : "";
 				line = `${prefix}${modelText} ${providerBadge}${checkmark}`;
 			} else {
 				const modelText = `  ${favoriteMarker}${item.id}`;
 				const providerBadge = theme.fg("muted", `[${item.provider}]`);
-				const checkmark = isCurrent ? theme.fg("success", " ✓") : "";
+				const checkmark = isCurrent && !this.policyOwned ? theme.fg("success", " ✓") : "";
 				line = `${modelText} ${providerBadge}${checkmark}`;
 			}
 
@@ -366,7 +408,11 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		} else {
 			const selected = this.filteredModels[this.selectedIndex];
 			this.listContainer.addChild(new Spacer(1));
-			this.listContainer.addChild(new Text(theme.fg("muted", `  Model Name: ${selected.model.name}`), 0, 0));
+			const description =
+				"model" in selected
+					? `  Model Name: ${selected.model.name}`
+					: "  Return model selection to the configured policy.";
+			this.listContainer.addChild(new Text(theme.fg("muted", description), 0, 0));
 		}
 		if (this.refreshStatusMessage) {
 			this.listContainer.addChild(new Spacer(1));
@@ -404,7 +450,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		else if (kb.matches(keyData, "tui.select.confirm")) {
 			const selectedModel = this.filteredModels[this.selectedIndex];
 			if (selectedModel) {
-				this.handleSelect(selectedModel.model);
+				this.handleSelect(selectedModel);
 			}
 		}
 		// Toggle favorite for selected model
@@ -423,8 +469,13 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		}
 	}
 
-	private handleSelect(model: Model<any>): void {
+	private handleSelect(item: SelectorItem): void {
 		this.dispose();
+		if (!("model" in item)) {
+			item.onSelect();
+			return;
+		}
+		const model = item.model;
 		// Save as new default
 		this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
 		this.onSelectCallback(model);
@@ -432,14 +483,16 @@ export class ModelSelectorComponent extends Container implements Focusable {
 
 	private handleToggleFavorite(): void {
 		const selectedModel = this.filteredModels[this.selectedIndex];
-		if (!selectedModel) return;
+		if (!selectedModel || !("model" in selectedModel)) return;
 
 		const allModelIds = this.allModels.map((model) => model.fullId);
 		this.favoriteIds = toggleFavoriteModel(this.favoriteIds, allModelIds, selectedModel.fullId);
 		// Row order is frozen for the session: no re-sort here. The marker
 		// re-renders from live favoriteIds via filterModels/updateList.
 		this.filterModels(this.searchInput.getValue());
-		const selectedIndex = this.filteredModels.findIndex((item) => item.fullId === selectedModel.fullId);
+		const selectedIndex = this.filteredModels.findIndex(
+			(item) => "model" in item && item.fullId === selectedModel.fullId,
+		);
 		if (selectedIndex >= 0) {
 			this.selectedIndex = selectedIndex;
 			this.updateList();

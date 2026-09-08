@@ -157,6 +157,7 @@ import type {
 	CompactionRejectionCause,
 	LazyToolActivator,
 	ModelSelectSource,
+	SessionModelPolicy,	ModelSwitchOptions,
 } from "./extensions/types.ts";
 import { normalizeToolExposure, RUNTIME_EXTENSION_PATH } from "./extensions/types.ts";
 import { shouldWarnHighReasoning } from "./high-reasoning-warning.ts";
@@ -198,6 +199,7 @@ import {
 	getLatestCompactionEntry,
 	type SessionHeader,
 } from "./session-manager.ts";
+import { resolveSessionModelPolicy } from "./session-model-policy.ts";
 import { generateSessionTitle, sessionTitleRetryPolicy, shouldSkipSessionTitle } from "./session-title-generator.ts";
 import { SessionWorkBarrier } from "./session-work-barrier.ts";
 import type { SettingsManager, SettingsSourceSelection } from "./settings-manager.ts";
@@ -617,6 +619,8 @@ export interface AgentSessionConfig {
 	extensionRunnerRef?: { current?: ExtensionRunner };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
+	/** Only SDK-resolved defaults of new sessions may be replaced by an extension model policy. */
+	modelPolicySelectionAllowed?: boolean;
 	autoTitleSessions?: boolean;
 }
 
@@ -1163,6 +1167,16 @@ export class AgentSession {
 	private _modelRegistry: ModelRegistry;
 	private readonly _fallbackValidationWarnings: readonly string[];
 	private readonly _retryFallback: RetryFallbackController;
+	private _modelPolicy: ReturnType<typeof resolveSessionModelPolicy> | undefined;
+	private _modelPolicyRevision = 0;
+	private _modelPolicySelectionAllowed: boolean;
+	private _modelSelectSource: ModelSelectSource | undefined;
+
+	/** Current model provenance, including selections made before a UI subscribes. */
+	get modelSelectSource(): ModelSelectSource | undefined {
+		return this._modelSelectSource;
+	}
+	private readonly _noModelFallback: boolean;
 	private readonly _selectorCooldowns: SelectorCooldowns;
 	private readonly _probeBackScheduler: ProbeBackScheduler;
 	private readonly _fallbackNow: () => number;
@@ -1193,12 +1207,14 @@ export class AgentSession {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
 		this.settingsManager = config.settingsManager;
+		this._modelPolicySelectionAllowed = config.modelPolicySelectionAllowed ?? false;
 		this._unsubscribeSettingsSource = this.settingsManager.subscribeToSourceSelection((source) => {
 			this._emit({ type: "settings_source_selected", ...source });
 		});
 		const noModelFallback =
 			config.resourceLoader.getExtensions().runtime.flagValues.get("no-model-fallback") === true ||
 			envValue("NO_FALLBACK") === "1";
+		this._noModelFallback = noModelFallback;
 		if (noModelFallback) {
 			this.settingsManager.applyOverrides({ retry: { modelFallback: false } });
 		}
@@ -1233,7 +1249,7 @@ export class AgentSession {
 		this._fallbackNow = config.fallbackNow ?? (() => Date.now());
 		this._retryRandom = config.retryRandom ?? Math.random;
 		this._retryFallback = new RetryFallbackController({
-			getSettings: () => this.settingsManager.getRetryFallbackSettings(),
+			getSettings: () => this.getRetryFallbackSettings(),
 			registry: this._modelRegistry,
 			cooldowns: this._selectorCooldowns,
 			logger: fallbackLogger,
@@ -1657,6 +1673,7 @@ export class AgentSession {
 	}
 
 	private _emit(event: AgentSessionEvent): void {
+		if (event.type === "model_changed") this._modelSelectSource = event.source;
 		this._logSessionEvent(event);
 		for (const l of this._eventListeners) {
 			l(event);
@@ -4624,8 +4641,8 @@ export class AgentSession {
 	 * Validates that auth is configured, saves to session and settings.
 	 * @throws Error if no auth is configured for the model
 	 */
-	async setModel(model: Model<any>): Promise<SystemPromptChangeEvent | undefined> {
-		return this._setModel(model, true);
+	async setModel(model: Model<any>, options?: ModelSwitchOptions): Promise<SystemPromptChangeEvent | undefined> {
+		return this._setModel(model, true, options?.deliberate ?? true);
 	}
 
 	assertModelUsable(
@@ -4673,13 +4690,110 @@ export class AgentSession {
 	 * Set the model for this session without changing the global model defaults.
 	 * The selection is still persisted in this session's history.
 	 */
-	async setSessionModel(model: Model<Api>): Promise<SystemPromptChangeEvent | undefined> {
-		return this._setModel(model, false);
+	async setSessionModel(model: Model<Api>, options?: ModelSwitchOptions): Promise<SystemPromptChangeEvent | undefined> {
+		return this._setModel(model, false, options?.deliberate ?? true);
+	}
+
+	getRetryFallbackSettings() {
+		const settings = this.settingsManager.getRetryFallbackSettings();
+		const policy = this._modelPolicy;
+		if (!policy) return settings;
+		const keys = policy.models.map(({ model }) => `${model.provider}/${model.id}`);
+		// Layer the policy over the configured chains per key, never replacing the whole map: a MAIN
+		// policy must not delete the chain a user configured for an unrelated model, and a manual
+		// switch to a model outside the policy has to keep falling back on its own configured chain.
+		// An explicitly disabled modelFallback still wins over the policy's multi-model default.
+		return {
+			...settings,
+			modelFallback: settings.modelFallback && !this._noModelFallback && policy.models.length > 1,
+			chains: { ...settings.chains, ...Object.fromEntries(keys.map((key) => [key, [...policy.selectors]])) },
+		};
+	}
+
+	async setModelPolicy(policy: SessionModelPolicy | undefined): Promise<void> {
+		const resolved = policy === undefined ? undefined : resolveSessionModelPolicy(policy, this._modelRegistry);
+		this._modelPolicyRevision++;
+		if (JSON.stringify(resolved?.selectors) === JSON.stringify(this._modelPolicy?.selectors)) return;
+		const previous = this._modelPolicy;
+		this._modelPolicy = resolved;
+		try {
+			// A fallback window is not a reason to skip application: this call clears that window a few
+			// lines below, so skipping would strand the session on a fallback model nobody chose while
+			// the newly declared chain never takes effect.
+			if (resolved && this._modelPolicySelectionAllowed) {
+				const primary = resolved.models.find(({ model }) => this._modelRuntime.hasConfiguredAuth(model.provider));
+				if (!primary) throw new Error("No configured authentication for any model in the session policy");
+				await this._switchActiveModel(primary.model, {
+					persistDefault: false,
+					appendSessionEntry: true,
+					emitModelSelect: true,
+					modelSelectSource: "policy",
+					selectionIntent: "policy",
+					invalidateCompaction: true,
+					ephemeralThinkingLevel: primary.thinkingLevel,
+				});
+			}
+		} catch (error) {
+			this._modelPolicy = previous;
+			throw error;
+		}
+		// An active fallback is an execution condition, not a user decision: the policy still owns the
+		// slot. Previously this disarmed selection permanently, so a config edit landing while a
+		// provider was being retried left the session on a fallback model nobody chose, with the
+		// configured chain unable to select again for the rest of the session.
+		this._probeBackScheduler.cancel("manual-model-change");
+		this._retryFallback.clear();
+		this.agent.abortServerSideFallback =
+			this.settingsManager.getAbortServerSideFallback() && this._retryFallback.hasConfiguredChain();
+	}
+
+	/** Whether a declared session model policy exists, so a UI can offer the return action. */
+	get hasModelPolicy(): boolean {
+		return this._modelPolicy !== undefined;
+	}
+
+	/** Whether the declared policy currently owns model selection. */
+	get isModelPolicyOwned(): boolean {
+		return this._modelPolicy !== undefined && this._modelPolicySelectionAllowed;
+	}
+
+	/**
+	 * Hand the MAIN slot back to the declared policy and apply it now.
+	 *
+	 * This is the user's way out of an override without losing the conversation: a deliberate pick is
+	 * durable within the session, but reversible. It deliberately does NOT go through setModelPolicy,
+	 * which early-returns when the selectors are unchanged - and unchanged is exactly the normal case
+	 * here, since the user wants the chain they already configured. It also must not go through
+	 * setModel, which would persist defaults and immediately surrender ownership again.
+	 */
+	async followModelPolicy(): Promise<SystemPromptChangeEvent | undefined> {
+		const policy = this._modelPolicy;
+		if (!policy) throw new Error("No session model policy is configured");
+		const primary = policy.models.find(({ model }) => this._modelRuntime.hasConfiguredAuth(model.provider));
+		if (!primary) throw new Error("No configured authentication for any model in the session policy");
+
+		// Returning is a deliberate fresh selection, so abandon any fallback window the same way a
+		// manual change does; the user asked for the configured primary, not the retry state.
+		const hadActiveFallback = this._retryFallback.activeState !== undefined;
+		this._probeBackScheduler.cancel("manual-model-change");
+		this._retryFallback.clearForManualModelChange(primary.model);
+		if (hadActiveFallback && this._retryAbortController) this.abortRetry();
+
+		return await this._switchActiveModel(primary.model, {
+			persistDefault: false,
+			appendSessionEntry: true,
+			emitModelSelect: true,
+			modelSelectSource: "policy",
+			selectionIntent: "policy",
+			invalidateCompaction: true,
+			ephemeralThinkingLevel: primary.thinkingLevel,
+		});
 	}
 
 	private async _setModel(
 		model: Model<Api>,
 		updateGlobalDefaults: boolean,
+		deliberate = true,
 	): Promise<SystemPromptChangeEvent | undefined> {
 		this.assertModelUsable(model, this._getDownswitchLiveContextTokens(model));
 		if (!(await this._modelRuntime.checkAuth(model.provider))) {
@@ -4689,6 +4803,10 @@ export class AgentSession {
 		// A manual model change abandons any active fallback window; if a fallback
 		// retry sleep is still pending, cancel it so no surprise continuation fires.
 		const hadActiveFallback = this._retryFallback.activeState !== undefined;
+		// Only a deliberate user pick takes the MAIN slot away from a declared policy. Builtin
+		// extensions drive this same path programmatically (a fast-mode toggle swaps to a variant and
+		// back, a recommendation switches on startup), and those must not transfer ownership: the user
+		// ends on a model they never chose while the configured chain goes inert for the session.
 		this._probeBackScheduler.cancel("manual-model-change");
 		this._retryFallback.clearForManualModelChange(model);
 		if (hadActiveFallback && this._retryAbortController) {
@@ -4700,13 +4818,14 @@ export class AgentSession {
 			appendSessionEntry: true,
 			emitModelSelect: true,
 			modelSelectSource: "set",
+			selectionIntent: deliberate ? "manual" : "programmatic",
 			invalidateCompaction: true,
 		});
 	}
 
 	private async _maybeRestoreFallbackPrimary(): Promise<void> {
 		try {
-			await this._retryFallback.maybeRestorePrimary(this.settingsManager.getRetryFallbackSettings().revertPolicy);
+			await this._retryFallback.maybeRestorePrimary(this.getRetryFallbackSettings().revertPolicy);
 		} catch (error) {
 			this._retryFallback.clear();
 			console.error("fallback revert failed; cleared fallback state", error);
@@ -4732,6 +4851,7 @@ export class AgentSession {
 			entryReason?: "fallback" | "fallback-revert";
 			emitModelSelect: boolean;
 			modelSelectSource: ModelSelectSource;
+			selectionIntent?: "policy" | "manual" | "programmatic";
 			invalidateCompaction: boolean;
 			ephemeralThinkingLevel?: ThinkingLevel;
 		},
@@ -4782,7 +4902,11 @@ export class AgentSession {
 					opts.entryReason,
 					previousModel?.provider,
 					previousModel?.id,
+					opts.selectionIntent,
 				);
+			}
+			if (opts.selectionIntent === "policy" || opts.selectionIntent === "manual") {
+				this._modelPolicySelectionAllowed = opts.selectionIntent === "policy";
 			}
 			if (opts.persistDefault) this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
 			// Emit only after all admission hooks have accepted the candidate.
@@ -4901,10 +5025,18 @@ export class AgentSession {
 		}
 		this._probeBackScheduler.cancel("manual-model-change");
 		this._retryFallback.clearForManualModelChange(next.model);
+		this._modelPolicySelectionAllowed = false;
 		const thinking = this._getThinkingForModelSwitch(next.model, next.thinkingLevel, next.thinkingSelection);
 
 		this.agent.state.model = next.model;
-		this.sessionManager.appendModelChange(next.model.provider, next.model.id);
+		this.sessionManager.appendModelChange(
+			next.model.provider,
+			next.model.id,
+			undefined,
+			undefined,
+			undefined,
+			"manual",
+		);
 		this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
 		const previousTier = this._currentServiceTier;
 		const previousFastMode = this.isFastModeActive();
@@ -6970,16 +7102,20 @@ export class AgentSession {
 					this._lazyToolActivators.push(activator);
 				},
 				getCommands,
+				// The extension surface is the automation path: fast mode swaps to a variant and back, a
+				// startup recommendation switches for the user. Those are not deliberate picks, so they
+				// must not take the MAIN slot away from a declared policy. A user picking a model goes
+				// through the mode's own session.setModel call, which stays deliberate by default.
 				setModel: async (model) => {
 					if (!this._modelRuntime.hasConfiguredAuth(model.provider)) return false;
-					await this.setModel(model);
+					await this.setModel(model, { deliberate: false });
 					return true;
 				},
 				getThinkingLevel: () => this.thinkingLevel,
 				setThinkingLevel: (level) => this.setThinkingLevel(level),
 				setSessionModel: async (model) => {
 					if (!this._modelRuntime.hasConfiguredAuth(model.provider)) return false;
-					await this.setSessionModel(model);
+					await this.setSessionModel(model, { deliberate: false });
 					return true;
 				},
 				setSessionThinkingLevel: (level) => this.setSessionThinkingLevel(level),
@@ -7022,7 +7158,11 @@ export class AgentSession {
 					blockImages: this.settingsManager.getBlockImages(),
 				}),
 				sessionSettings: {
-					getRetryFallbackSettings: () => this.settingsManager.getRetryFallbackSettings(),
+					getRetryFallbackSettings: () => this.getRetryFallbackSettings(),
+					setModelPolicy: (policy) => this.setModelPolicy(policy),
+					followModelPolicy: async () => {
+						await this.followModelPolicy();
+					},
 					setFallbackChain: async (key, entries) => {
 						this.settingsManager.setFallbackChain(key, [...entries]);
 						await this.settingsManager.flush();
@@ -7383,6 +7523,7 @@ export class AgentSession {
 			return veto;
 		}
 		resetTimings("reload");
+		const modelPolicyRevision = this._modelPolicyRevision;
 		const oldExtensionRunner = this._extensionRunner;
 		const oldExtensionIdentities = oldExtensionRunner.getExtensionIdentities();
 		const previousFlagValues = oldExtensionRunner.getFlagValues();
@@ -7478,6 +7619,7 @@ export class AgentSession {
 			await this.extendResourcesFromExtensions("reload");
 		}
 		time("lifecycle", "reload");
+		if (modelPolicyRevision === this._modelPolicyRevision) await this.setModelPolicy(undefined);
 		return { cancelled: false };
 	}
 

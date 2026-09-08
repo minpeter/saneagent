@@ -126,6 +126,8 @@ export interface ModelChangeEntry extends SessionEntryBase {
 	/** The model active before a fallback window, retained for restart restoration. */
 	originalProvider?: string;
 	originalModelId?: string;
+	/** Exact selection intent; omitted by legacy histories. Machine switches do not claim ownership. */
+	selectionIntent?: "policy" | "manual" | "programmatic";
 }
 
 export interface CompactionEntry<T = unknown> extends SessionEntryBase {
@@ -1070,7 +1072,10 @@ export class SessionManager {
 		const persistedEntry = this.residentStore.materialize(entry);
 
 		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
-		if (!hasAssistant) {
+		// A deliberate model choice is meaningful session state even before the first assistant
+		// response. Persist it immediately so reopening an otherwise empty conversation does not
+		// silently turn the user's override back into policy ownership.
+		if (!hasAssistant && !(entry.type === "model_change" && entry.selectionIntent === "manual")) {
 			if (this.flushed) {
 				appendFileSync(this.sessionFile, `${JSON.stringify(persistedEntry)}\n`);
 			} else {
@@ -1243,6 +1248,7 @@ export class SessionManager {
 		reason?: "fallback" | "fallback-revert",
 		originalProvider?: string,
 		originalModelId?: string,
+		selectionIntent?: ModelChangeEntry["selectionIntent"],
 	): string {
 		const entry: ModelChangeEntry = {
 			type: "model_change",
@@ -1254,6 +1260,7 @@ export class SessionManager {
 			reason,
 			originalProvider,
 			originalModelId,
+			selectionIntent,
 		};
 		this._appendEntry(entry);
 		return entry.id;

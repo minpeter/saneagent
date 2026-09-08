@@ -4,6 +4,7 @@ import type { Credential } from "@earendil-works/pi-ai";
 import { rendezvousOrder } from "@earendil-works/pi-ai/auth/pool/select";
 import { listSlots } from "@earendil-works/pi-ai/auth/pool/slots";
 import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import type { ModelSelectSource } from "../../../core/extensions/types.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
 import type { InteractiveSession } from "../interactive-host-runtime.ts";
 import { theme } from "../theme/theme.ts";
@@ -100,6 +101,7 @@ export class FooterComponent implements Component {
 	private footerData: ReadonlyFooterDataProvider;
 	private autoCompactEnabled = true;
 	private compactionDelegated = false;
+	private modelSelectSource: ModelSelectSource | undefined;
 
 	constructor(session: InteractiveSession, footerData: ReadonlyFooterDataProvider) {
 		this.session = session;
@@ -108,6 +110,11 @@ export class FooterComponent implements Component {
 
 	setSession(session: InteractiveSession): void {
 		this.session = session;
+		this.modelSelectSource = undefined;
+	}
+
+	setModelSelectSource(source: ModelSelectSource | undefined): void {
+		this.modelSelectSource = source;
 	}
 
 	setAutoCompactEnabled(enabled: boolean): void {
@@ -218,8 +225,10 @@ export class FooterComponent implements Component {
 		// Model label pinned to the right edge; the provider prefix stays only when
 		// the full line fits.
 		const modelName = state.model?.id || "no-model";
+		const isPolicyModel = (this.modelSelectSource ?? this.session.modelSelectSource) === "policy";
 		const fastIndicator = this.session.isFastModeActive() ? FAST_MODE_INDICATOR : "";
-		let minimalRight = `${fastIndicator}${modelName}`;
+		const policyModelPrefix = isPolicyModel && state.model ? `(policy) ${state.model.provider}/` : "";
+		let minimalRight = `${policyModelPrefix}${fastIndicator}${modelName}`;
 		if (state.model?.reasoning) {
 			const thinkingLevel = state.thinkingLevel || "off";
 			minimalRight = thinkingLevel === "off" ? `${minimalRight}:off` : `${minimalRight}:${thinkingLevel}`;
@@ -237,7 +246,7 @@ export class FooterComponent implements Component {
 			}
 		}
 		const providerPrefix =
-			(this.footerData.getAvailableProviderCount() > 1 || accountSuffix !== "") && state.model
+			!isPolicyModel && (this.footerData.getAvailableProviderCount() > 1 || accountSuffix !== "") && state.model
 				? `(${state.model.provider}${accountSuffix}) `
 				: "";
 		const full: FooterSegment | undefined = providerPrefix

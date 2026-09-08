@@ -103,6 +103,7 @@ import {
 	resolveModelScopeWithDiagnostics,
 	type ScopedModel,
 } from "../../core/model-resolver.ts";
+import { resolveModelCommandAction } from "../../core/model-command-action.ts";
 import { CredentialSynchronizationError } from "../../core/model-runtime.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
@@ -4919,6 +4920,7 @@ export class InteractiveMode {
 			}
 
 			case "model_changed":
+				this.footer?.setModelSelectSource?.(event.source);
 				// Shared-host/other-client model switches arrive as model_changed wire
 				// events; the new model must not inherit the previous model's
 				// SDK-delegation episode (post-#1188 core emits no repeat rejection to
@@ -6876,18 +6878,46 @@ export class InteractiveMode {
 	}
 
 	private async handleModelCommand(searchTerm?: string): Promise<void> {
-		if (!searchTerm) {
+		const action = resolveModelCommandAction(searchTerm, { hasPolicy: this.session.hasModelPolicy });
+		if (action.kind === "open-selector") {
 			this.showModelSelector();
 			return;
 		}
+		if (action.kind === "error") {
+			this.showError(action.message);
+			return;
+		}
+		if (action.kind === "follow-policy") {
+			await this.followModelPolicyFromUi();
+			return;
+		}
 
-		const model = await this.findExactModelMatch(searchTerm);
+		const model = await this.findExactModelMatch(action.searchTerm);
 		if (model) {
 			await this.selectModelFromUi(model);
 			return;
 		}
 
-		this.showModelSelector(searchTerm);
+		this.showModelSelector(action.searchTerm);
+	}
+
+	/**
+	 * Hand the MAIN slot back to the configured chain. Failures (no authenticated model in the
+	 * policy) are reported like any other model switch failure rather than escaping into the UI.
+	 */
+	private async followModelPolicyFromUi(): Promise<void> {
+		try {
+			const systemPromptChange = await this.session.followModelPolicy();
+			this.footer.invalidate();
+			this.updateEditorBorderColor();
+			const applied = systemPromptChange?.systemPromptName
+				? ` (optimized system prompt applied: ${systemPromptChange.systemPromptName})`
+				: "";
+			const model = this.session.model;
+			this.showStatus(`Model: ${model?.id ?? "unknown"} (following configured policy)${applied}`);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
 	}
 
 	private async findExactModelMatch(searchTerm: string): Promise<Model<any> | undefined> {
@@ -7132,6 +7162,14 @@ export class InteractiveMode {
 					onFavoriteChange: async (favoriteIds, allModels) => {
 						await this.applyFavoriteSelection(favoriteIds, allModels, true, await favoritePatternSnapshot);
 					},
+					policyOwned: this.session.isModelPolicyOwned,
+					onFollowPolicy: this.session.hasModelPolicy
+						? () => {
+								done();
+								this.ui.requestRender();
+								void this.followModelPolicyFromUi();
+							}
+						: undefined,
 				},
 			);
 			return {

@@ -315,8 +315,30 @@ export interface RetryFallbackStatus {
 	pinned: boolean;
 }
 
-/** Narrow session-owned settings access for extensions that manage retry fallback. */
+export interface SessionModelPolicy {
+	/** Ordered, exact provider/model IDs. No implicit provider or default-chain expansion. */
+	models: readonly { model: string; thinkingLevel?: ThinkingLevel }[];
+}
+
+/**
+ * How a model switch should be attributed. A deliberate switch is a user picking a model and takes
+ * the MAIN slot away from a declared policy; a non-deliberate one is a programmatic swap by a
+ * builtin (fast mode, a startup recommendation) and leaves policy ownership untouched.
+ */
+export interface ModelSwitchOptions {
+	deliberate?: boolean;
+}
+
+/** Settings commands persist; setModelPolicy is the session-only override boundary. */
 export interface ExtensionSessionSettings {
+	/** Replace the session policy, or clear it. Never writes settings.json. */
+	setModelPolicy?(policy: SessionModelPolicy | undefined): Promise<void>;
+	/**
+	 * Hand the MAIN slot back to the declared policy and apply it now. The way out of a manual
+	 * override without discarding the conversation. Rejects when no policy is configured or none of
+	 * its models has configured auth, leaving the active model untouched.
+	 */
+	followModelPolicy?(): Promise<void>;
 	getRetryFallbackSettings(): RetryFallbackSettings;
 	setFallbackChain(key: string, entries: readonly string[]): Promise<void>;
 	removeFallbackChain(key: string): Promise<void>;
@@ -1135,7 +1157,15 @@ export interface ToolExecutionEndEvent {
 // Model Events
 // ============================================================================
 
-export type ModelSelectSource = "set" | "cycle" | "restore" | "fallback" | "fallback-revert";
+/**
+ * Why the active model changed.
+ *
+ * `policy` is a declared session model policy selecting the model - on startup, when the declared
+ * chain changes, or when the user hands the slot back. It is deliberately distinct from `restore`,
+ * which means the model was restored from session history: a consumer showing where the current
+ * model came from must be able to tell a configured chain from a resumed conversation.
+ */
+export type ModelSelectSource = "set" | "cycle" | "policy" | "restore" | "fallback" | "fallback-revert";
 
 /** Fired when a new model is selected */
 export interface ModelSelectEvent {

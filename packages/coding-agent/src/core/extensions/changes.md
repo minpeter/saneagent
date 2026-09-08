@@ -1,5 +1,18 @@
 # Core Extensions Changes
 
+## 2026-09-06 - Optional non-persistent session model policy API
+
+`ExtensionSessionSettings.setModelPolicy` accepts an ordered nonempty `models`
+list of exact provider/model IDs with optional `thinkingLevel`, or `undefined`
+to remove the override. AgentSession owns the policy; persistent fallback command
+setters retain their existing meaning. The optional API lets adapters detect old
+hosts instead of writing global settings as a compatibility workaround.
+
+This requires a core boundary because settings overrides belong to SettingsManager,
+not a session, and extension reload must withdraw removed policy owners. Expected
+merge-conflict zones: types.ts ExtensionSessionSettings and AgentSession's bound
+sessionSettings facade. No new event, loader shim, or persistent format is added.
+
 ## 2026-09-04 - UI prompt lifecycle events
 
 ### What changed
@@ -1972,3 +1985,27 @@ If upstream modifies compaction event definitions in `types.ts`, preserve the ad
 Extension APIs now expose `pi.rpc.emit(name, data)`. It validates a non-empty name and publishes an
 opaque payload on the generation-owned extension bus; it does not write to a transport directly.
 Keep ordinary `pi.events` extension-local, and keep RPC delivery opt-in at the connection boundary.
+
+## MAIN model policy ownership and provenance (2026-09-08)
+
+`ExtensionSessionSettings` gains `followModelPolicy()`: hand the MAIN slot back to the declared
+policy and apply it now. It rejects when no policy is configured or none of its models has
+configured auth, leaving the active model untouched. It exists because `setModelPolicy` early-returns
+on identical selectors, which is exactly the case when a user wants the chain they already declared.
+
+`ModelSelectSource` gains `policy`, emitted whenever a declared policy selects the model - startup,
+a changed chain, or a return. Both paths previously reused `restore`, which means session-history
+restore, so a consumer showing where the current model came from could not distinguish a configured
+chain from a resumed conversation. Consumers that switch on this union must handle the new value;
+`restore` now means history restore only.
+
+Ownership is also no longer transferred by machine events. `setModel`/`setSessionModel` take
+`{ deliberate }`, and the extension surface (`pi.setModel`, `pi.setSessionModel`) passes
+`deliberate: false` - a builtin swapping models programmatically no longer leaves the declared chain
+inert for the session. An active fallback window no longer disarms policy selection either.
+
+### Files modified
+
+- `types.ts`
+- `../agent-session.ts`
+- `../model-command-action.ts` (new)

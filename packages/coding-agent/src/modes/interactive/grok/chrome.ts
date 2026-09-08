@@ -18,6 +18,8 @@ export interface InteractiveFooter extends Component {
 	setAutoCompactEnabled(enabled: boolean): void;
 	/** Optional: mark the context meter while an external owner compacts natively. */
 	setCompactionDelegated?(delegated: boolean): void;
+	/** Optional: label the active model's selection provenance in the footer. */
+	setModelSelectSource?(source: import("../../../core/extensions/types.ts").ModelSelectSource | undefined): void;
 	invalidate(): void;
 	dispose(): void;
 }

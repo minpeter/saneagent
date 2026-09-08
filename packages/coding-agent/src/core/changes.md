@@ -1,3 +1,39 @@
+## 2026-09-08 - Restore policy selection intent across restart
+
+### What changed
+
+- `packages/coding-agent/src/core/session-manager.ts`: model-change entries optionally carry exact `selectionIntent` (`policy`, `manual`, or `programmatic`) using the existing branch-local JSONL persistence.
+- `packages/coding-agent/src/core/sdk.ts`: restore policy ownership from the latest owning selection, ignoring programmatic and transient fallback changes; explicit launch models record a manual selection. Histories without intent retain their existing override semantics.
+- `packages/coding-agent/src/core/agent-session.ts`: record policy/manual/programmatic intent only after a model switch is admitted; expose current model-event provenance as session state for late UI subscribers. Policy application restores configured tuning without changing ordinary settings defaults.
+
+### Why
+
+- Restart previously restored a policy primary as a manual override, lost its ephemeral reasoning level, and disabled subsequent policy reloads. Deliberate picks, including the current primary, must remain distinguishable from machine switches.
+
+### Why an extension could not handle it
+
+- SDK restoration precedes extension binding and the engine owns durable model selection and successful switch admission. Footer subscriptions can start after the policy event has already fired.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/core/session-manager.ts`: ModelChangeEntry and appendModelChange.
+- `packages/coding-agent/src/core/sdk.ts`: existing-session restoration and AgentSession construction.
+- `packages/coding-agent/src/core/agent-session.ts`: model switches, cycle persistence, and model_changed publication.
+
+
+## 2026-09-06 - Session-owned model policy
+
+`AgentSession.setModelPolicy` replaces the effective ordered fallback chain without
+changing settings. Only SDK-resolved defaults in new sessions may adopt the policy
+primary; explicit, restored and manual selections remain authoritative. Models
+outside the list have no policy fallback; one entry disables cross-model fallback.
+Reload updates config-owned selection and removes policies no longer supplied by
+an extension. Unchanged policies preserve active fallback state. Exact IDs are
+validated before applying, with no default or provider-family expansion.
+
+The persistent extension settings setters cannot provide this boundary. Conflict
+zones: AgentSession fallback binding, manual model selection and reload; SDK new
+session provenance; the new session-model-policy resolver.
 
 ## 2026-09-05 - Persist Astra reasoning configuration updates
 
@@ -4938,4 +4974,41 @@ unrelated fallback bus, silently disconnecting `pi.rpc.emit` on trust-requiring 
   packages/coding-agent/src/core/agent-session.ts and candidate reservation in
   packages/coding-agent/src/core/retry-fallback/controller.ts.
 
+## MAIN model policy ownership
 
+A declared session model policy owns the MAIN slot until the USER deliberately takes it. Machine
+events never transfer ownership:
+
+- `setModel`/`setSessionModel` accept `{ deliberate }`, defaulting to a user pick. The extension
+  surface (`pi.setModel`, `pi.setSessionModel`) passes `deliberate: false`, so a builtin swapping
+  models programmatically - a fast-mode toggle to a variant and back, a startup recommendation - no
+  longer leaves the configured chain inert for the session.
+- An active fallback window no longer disarms policy selection. It is an execution condition, not a
+  decision. `setModelPolicy` also stops skipping application during a fallback window, because the
+  same call clears that window: skipping stranded the session on a fallback model nobody chose while
+  the newly declared chain never took effect.
+- `followModelPolicy()` hands the slot back and applies the currently loaded policy. It exists
+  because `setModelPolicy` early-returns on identical selectors, which is the normal case when a user
+  wants the chain they already configured. It keeps `persistDefault: false` and rejects - leaving the
+  active model untouched - when no policy is configured or none of its models has configured auth.
+  Exposed to extensions as `sessionSettings.followModelPolicy`.
+
+Reload still does NOT re-arm: a config watcher can request reload on its own, so re-arming there
+would let an unrelated resource change silently revoke a deliberate pick.
+
+### Provenance
+
+`ModelSelectSource` gains `policy`, emitted by both policy paths (startup/changed-chain application
+and `followModelPolicy`). Previously both reused `restore`, which is session-history restore, so a
+consumer showing where the current model came from could not tell a configured chain from a resumed
+conversation. `restore` now means history restore only.
+
+### Discoverability
+
+`/model policy` hands the slot back. The argument decision lives in `core/model-command-action.ts`
+(`resolveModelCommandAction`) so the routing is testable without a terminal; the interactive mode
+keeps painting and notification. The term matches the whole argument only, so a model named e.g.
+`policy-tuned-v2` stays a model search. With no policy configured the command reports that instead
+of searching for a model called "policy", and a policy whose models all lack auth fails through the
+normal model-switch error path with the active model untouched. `AgentSession.hasModelPolicy`
+exposes the gate the UI needs; the slash-command hint advertises `<provider/model>|policy`.

@@ -1,3 +1,61 @@
+## 2026-09-08 - Preserve policy picker focus through catalog changes
+
+### What changed
+
+- `packages/coding-agent/src/modes/interactive/components/model-selector.ts`: retain the selected action or model by row identity across catalog refresh and scope switching. Initial policy-owned focus remains on the policy action; explicit arrow navigation is not reset by later catalog updates.
+
+### Why
+
+- Scope switching reset policy focus to the current model, while asynchronous refresh reset a user's browsed model to policy. Reusing numeric indices also fails when scope order differs.
+
+### Why an extension could not handle it
+
+- The engine component owns picker focus and catalog reconstruction.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/modes/interactive/components/model-selector.ts`: refreshModels, setScope, and filterModels selection restoration.
+
+## 2026-09-08 - Render policy provenance from the current session
+
+### What changed
+
+- `packages/coding-agent/src/modes/interactive/components/footer.ts`: seed current model provenance from the session rather than relying only on events; clear cached wire-event provenance when the session is rebound.
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`: remove the duplicate footer setter call while preserving shared-host wire updates.
+
+### Why
+
+- Startup binds extensions before subscribing to model events. A correctly selected policy model therefore lost its label on relaunch, and a cached label could leak across session replacement. Rendering from the current session fixes both without persisting a display flag.
+
+### Why an extension could not handle it
+
+- Footer state and startup subscription ordering are engine-owned.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/modes/interactive/components/footer.ts`: model label prefix.
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`: model_changed handling.
+
+
+## 2026-09-08 - Return to configured policy from the model picker
+
+### What changed
+
+- `packages/coding-agent/src/modes/interactive/components/model-selector.ts` renders a searchable policy action separately from models. Enter dispatches it without persisting a model default; favorite toggles ignore it. Catalog refresh and scope changes retain the action.
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts` supplies the action only when a session policy exists, closes the selector and repaints before invoking the existing policy-return success/error path.
+
+### Why
+
+- Users must be able to return model ownership to configured policy inside the actual picker rather than knowing a special command argument.
+
+### Why an extension could not handle it
+
+- The engine owns model-picker rows, favorite handling, and overlay disposal; the existing extension policy API cannot insert a non-model picker action.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/modes/interactive/components/model-selector.ts`: selector options, filtering, rendering, and input dispatch.
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`: `showModelSelector` options and callbacks.
 
 ## 2026-09-05 - Restore Working text shimmer on turn start
 

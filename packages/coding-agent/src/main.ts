@@ -557,6 +557,7 @@ function buildSessionOptions(
 	hasExistingSession: boolean,
 	modelRuntime: ModelRuntime,
 	settingsManager: SettingsManager,
+	explicitModelScope: boolean,
 ): {
 	options: CreateAgentSessionOptions;
 	cliThinkingFromModel: boolean;
@@ -595,7 +596,7 @@ function buildSessionOptions(
 		}
 	}
 
-	if (!options.model && scopedModels.length > 0 && !hasExistingSession) {
+	if (!options.model && scopedModels.length > 0 && !hasExistingSession && explicitModelScope) {
 		// Check if saved default is in scoped models - use it if so, otherwise first scoped model
 		const savedProvider = settingsManager.getDefaultProvider();
 		const savedModelId = settingsManager.getDefaultModel();
@@ -630,7 +631,8 @@ function buildSessionOptions(
 	// Scoped models for Ctrl+P cycling
 	// Keep thinking level undefined when not explicitly set in the model pattern.
 	// Undefined means "inherit current session thinking level" during cycling.
-	if (scopedModels.length > 0) {
+	// Let the SDK resolve settings-derived narrowing without marking it as an explicit scope.
+	if (scopedModels.length > 0 && explicitModelScope) {
 		options.scopedModels = scopedModels.map((sm) => ({
 			model: sm.model,
 			thinkingLevel: sm.thinkingLevel,
@@ -1045,9 +1047,10 @@ export async function main(args: string[], options?: MainOptions) {
 		} = buildSessionOptions(
 			runtimeParsed,
 			scopedModels,
-			sessionManager.hasContextMessages(),
+			sessionManager.hasContextMessages() || sessionManager.buildSessionContext().model !== null,
 			modelRuntime,
 			settingsManager,
+			Boolean(parsed.models?.length),
 		);
 		diagnostics.push(...sessionOptionDiagnostics);
 

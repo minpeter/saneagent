@@ -260,6 +260,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Check if session has existing data to restore
 	const existingSession = sessionManager.buildSessionContext();
 	const hasExistingSession = existingSession.messages.length > 0;
+	const lastModelSelection = sessionManager
+		.getBranch()
+		.findLast((entry) => entry.type === "model_change" && !entry.reason && entry.selectionIntent !== "programmatic");
+	const followsPolicy = lastModelSelection?.type === "model_change" && lastModelSelection.selectionIntent === "policy";
 	const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
 
 	let model = options.model;
@@ -278,7 +282,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 
 	// If session has data, try to restore model from it
-	if (!model && hasExistingSession && existingSession.model) {
+	const hasPersistedManualSelection =
+		lastModelSelection?.type === "model_change" && lastModelSelection.selectionIntent === "manual";
+	if (!model && (hasExistingSession || hasPersistedManualSelection) && existingSession.model) {
 		const restored = resolveStoredModelReference(
 			existingSession.model.provider,
 			existingSession.model.modelId,
@@ -306,7 +312,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			modelRuntime,
 		});
 		model = result.model;
-		initialModelProvenance = result.provenance;
+		// Settings narrowing is a default, not an explicit SDK/CLI scope selection.
+		initialModelProvenance =
+			result.provenance === "scoped" && options.scopedModels === undefined ? "settings" : result.provenance;
 		const selectedModel = model;
 		const scopedSelection = selectedModel
 			? scopedModels.find(
@@ -332,7 +340,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	// An exact-session thinking entry wins over settings unless a real legacy alias already
 	// selected a level. Old entries have no provenance, including Cursor's synthetic off.
-	if (thinkingLevel === undefined && hasExistingSession && hasThinkingEntry) {
+	if (thinkingLevel === undefined && (hasExistingSession || hasPersistedManualSelection) && hasThinkingEntry) {
 		thinkingLevel = existingSession.thinkingLevel as ThinkingLevel;
 		thinkingSelection = existingSession.thinkingSelection;
 	}
@@ -356,7 +364,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Clamp to model capabilities without inventing provenance for a defaulted level.
 	if (!model) {
 		thinkingLevel = "off";
-	} else {
+	} else if (!lastModelSelection) {
 		thinkingLevel = clampThinkingLevelToModel(thinkingLevel, model);
 	}
 	if (thinkingSelection) thinkingSelection = { ...thinkingSelection, level: thinkingLevel };
@@ -480,9 +488,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// from initialState; assign the separately computed provenance explicitly.
 	agent.state.thinkingSelection = thinkingSelection;
 
-	// Restore messages if session has existing data
-	if (hasExistingSession) {
+	// Preserve durable manual intent even before the first conversation message.
+	if (hasExistingSession || hasPersistedManualSelection) {
 		agent.state.messages = existingSession.messages;
+		// An explicit launch selection also replaces any previously recorded policy intent.
+		if (options.model && model) {
+			sessionManager.appendModelChange(model.provider, model.id, undefined, undefined, undefined, "manual");
+		}
 		if (!hasThinkingEntry) {
 			sessionManager.appendThinkingLevelChange(thinkingLevel, thinkingSelection);
 		}
@@ -514,6 +526,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		modelRuntime,
 		modelRegistry,
 		initialActiveToolNames,
+		modelPolicySelectionAllowed:
+			!options.model &&
+			(!hasExistingSession || followsPolicy) &&
+			!hasPersistedManualSelection &&
+			initialModelProvenance !== "cli" &&
+			initialModelProvenance !== "scoped",
 		defaultToolNames: sessionDefaultToolNames,
 		allowedToolNames,
 		excludedToolNames,
