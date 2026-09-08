@@ -1,5 +1,92 @@
 # changes.md — builtin compaction policy
 
+## Recover fitting retained suffixes with consistent token accounting (2026-09-08)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/compaction/deterministic-fallback.ts` estimates serialized envelopes and checkpoint text through the shared weighted token estimator instead of treating UTF-8 bytes as tokens. Only actual image payloads are omitted from envelope estimation; image costs remain additive and opaque metadata remains charged.
+- Candidate chain validation is suffix-local: discarded historical duplicate IDs cannot invalidate a retained unique pair. Recovery also backtracks from the latest user request to its complete tool-chain boundary.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/index.ts` now passes fallback diagnostics into a bounded rejection message containing the effective window, reserve, budget, candidate, and unsafe message location, with recovery guidance.
+- Fresh blocking compaction and unchanged failed warm snapshots now use the same required fallback as manual/core compaction. Stale warm failures are regenerated against a fresh snapshot; abort, generation, revision, lane, and core apply checks remain in place.
+
+### Why
+
+- code-yeongyu/oh-my-openagent#7952 reported a chain-valid latest turn of roughly 136k tokens that could not recover. The serialized-byte floor could charge that prose as over 540k tokens, while the production caller discarded the diagnostic that distinguished budget rejection from malformed content.
+- Real CLI validation found that the separate automatic blocking route never reached deterministic recovery after a classified summary failure, so correcting only the core/manual hook left that route unprotected.
+
+### Why an extension could not handle it
+
+- The builtin owns candidate acceptance and cancels required compaction before another extension can correct its estimate or select a valid boundary. The repair stays inside that builtin rather than modifying session-core admission.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/core/extensions/builtin/compaction/deterministic-fallback.ts`: suffix scan, chain-valid ranges, candidate diagnostics.
+- `packages/coding-agent/src/core/extensions/builtin/compaction/index.ts`: classified summarization failure handler.
+- Tests: `test/suite/regressions/issue-7952-compaction-recovery.test.ts` and the existing deterministic-fallback budget/unsafe-message fixtures.
+
+## Normalize failed and aborted assistant fragments in the fallback projection (2026-09-07)
+
+### What changed
+
+- New `fallback-failed-turn-normalization.ts` reuses the transport's canonical `dropFailedAssistantTurns` (the last step of `convertToLlm` in `packages/coding-agent/src/core/messages.ts`) to mark, positionally, the messages a provider request never receives: assistant turns that stopped with `error` or `aborted`, plus the tool results orphaned by that drop.
+- `deterministic-fallback.ts` applies that mask to its own candidate projection before structural acceptance runs, so a failed fragment's dangling `toolCall` block is no longer counted as an unpaired or incomplete call and its bytes are no longer charged against the retained budget. The mask is local to the projection; raw session history and the emitted `CompactionResult` boundary are unchanged.
+- Existing acceptance is untouched for everything else: valid call/result pairs, rejection of an incomplete ACTIVE call (`stopReason` `toolUse`/`stop` whose result is genuinely pending), malformed image and signature rejection, duplicate or reversed chains, and the effective-reserve budget all keep their behavior and diagnostics.
+
+### Why
+
+- code-yeongyu/oh-my-openagent#7921 case 7: after a provider error or abort, the retained suffix carries assistant fragments whose `toolCall` blocks never got a result. Structural acceptance treated those as cut atomic chains and rejected every candidate, so the deterministic fallback returned `undefined` and the session stayed wedged above its threshold - even though the transport already drops exactly those turns before the next request, meaning the rejected candidate would have been valid on the wire.
+
+### Why an extension could not handle it
+
+- Required-compaction fallback admission is this builtin's private recovery contract. An external extension observes only the final cancel reason and cannot re-admit a candidate this handler has already refused.
+
+### Expected merge conflict zones
+
+- LOW: the projection scan head in `deterministic-fallback.ts` (the mask lookup inside the reverse suffix loop).
+- LOW: `fallback-failed-turn-normalization.ts` is fork-owned and new.
+- Tests: `test/compaction/required-compaction-deterministic-fallback.test.ts`.
+
+## Count retained image tokens separately from serialized payload bytes (2026-09-07)
+
+### What changed
+
+- `deterministic-fallback.ts` replaces only the escaped `data` bytes of validated top-level tool-result image blocks with their existing `estimateTokens` image cost.
+- The conservative serialized-byte floor still includes all text, JSON delimiters, image metadata, tool arguments, and unrelated `data` fields. Image costs remain additive when that text floor dominates the ordinary estimator.
+- Bounded-value checks, malformed-content rejection, atomic tool-chain validation, effective reserve scaling, and transport byte budgets are unchanged.
+
+### Why
+
+- Issue #1455: a valid 512x512 PNG costs 1,200 estimated image tokens but its Base64 payload exceeds 1.3 million bytes. Charging those bytes against the token window rejected the prepared suffix after summarization failed, even after #1412 allowed valid image blocks.
+
+### Why an extension could not handle it
+
+- Required-compaction fallback admission is owned by this builtin. A later extension cannot correct its rejection without bypassing normal recovery.
+
+### Expected merge conflict zones
+
+- LOW: retained-message sizing in `deterministic-fallback.ts`.
+- Tests: `test/suite/regressions/issue-1455-*`.
+
+## Allow explicit manual compaction on SDK-owned automatic lanes (2026-09-07)
+
+### What changed
+
+- `lane-policy.ts` exposes one reason-aware `ownsCompaction` predicate: manual requests are senpi-owned for recovery even on SDK-native lanes; automatic threshold, overflow, pre-prompt, and speculative routes remain SDK-owned. The predicate is used for the before-compact admission and failure-accounting sites; the message-end degradation site is automatic-only and remains unchanged.
+- Failed manual compactions are recorded by the circuit breaker, including on SDK-native lanes; manual requests no longer bypass the breaker.
+- Concurrent SDK/native and senpi work is protected by the existing speculative generation and message-revision checks before generated results are applied.
+
+### Why
+
+- A rejected downsizing leaves the larger model selected so the user can compact first. Cancelling explicit `/compact` with `external-owner` blocked that recovery; manual requests must reach the existing summary generation and persistence path without weakening model admission.
+
+### Why an extension could not handle it
+
+- The cancellation is owned by this builtin hook. Another extension cannot safely undo its rejection or replace the coordinated compaction lifecycle.
+
+### Expected merge conflict zones
+
+- LOW: `packages/coding-agent/src/core/extensions/builtin/compaction/index.ts` around the SDK-native lane guard in `session_before_compact`.
+
 ## Omit speculation lead from resumed-session admission (2026-09-03)
 
 ### What changed

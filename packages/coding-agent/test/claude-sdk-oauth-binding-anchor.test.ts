@@ -161,11 +161,27 @@ describe("claude-sdk-oauth stored binding anchor", () => {
 		expect(bindingFromStoredBranch(branch, stored())).toMatchObject({ sdkSessionId: "sdk-1" });
 	});
 
-	it("rejects unknown custom metadata after the committed assistant", () => {
+	it("admits custom ledger metadata of any type after the committed assistant", () => {
 		const branch = [
 			marker(),
 			assistantEntry(),
 			{ type: "custom" as const, id: "unknown", customType: "unknown-extension-state", data: {} },
+		];
+
+		expect(bindingFromStoredBranch(branch, stored())).toMatchObject({ sdkSessionId: "sdk-1" });
+	});
+
+	it("rejects a model-visible custom message after the committed assistant", () => {
+		const branch = [
+			marker(),
+			assistantEntry(),
+			{
+				type: "custom_message" as const,
+				id: "nudge",
+				customType: "unknown-nudge",
+				content: "again",
+				display: false,
+			},
 		];
 
 		expect(bindingFromStoredBranch(branch, stored())).toBeUndefined();

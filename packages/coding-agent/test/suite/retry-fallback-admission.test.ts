@@ -51,7 +51,9 @@ describe("fallback context admission", () => {
 			expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
 			expect(harness.session.retryAttempt).toBe(0);
 			expect(
-				harness.sessionManager.getEntries().filter((entry) => entry.type === "model_change" && entry.modelId === "small"),
+				harness.sessionManager
+					.getEntries()
+					.filter((entry) => entry.type === "model_change" && entry.modelId === "small"),
 			).toEqual([]);
 		});
 	}

@@ -102,6 +102,7 @@ import {
 	shouldCompact,
 } from "./compaction/index.ts";
 import { CompactionLifecycleCoordinator, type CompactionLifecycleState } from "./compaction/lifecycle.ts";
+import { isTurnStuckOnContextOverflow } from "./compaction/stuck-overflow.ts";
 import { isWarmSummaryAnchorValid } from "./compaction/warm-anchor.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import { type BuildDynamicSystemPromptOptions, buildDynamicSystemPrompt } from "./dynamic-prompt/index.ts";
@@ -113,7 +114,11 @@ import {
 	ModelUsabilityBudgetError,
 	projectModelUsabilityBudget,
 } from "./extensions/builtin/compaction/model-usability-budget.ts";
-import { resolveReserveTokens } from "./extensions/builtin/compaction/policy.ts";
+import {
+	resolveEffectiveReserveTokens,
+	resolveReserveTokens,
+	shouldTriggerCompaction,
+} from "./extensions/builtin/compaction/policy.ts";
 import { WAKE_SOURCE_STATE_EVENT } from "./extensions/builtin/monitor-state-event.ts";
 import { CODEX_RESPONSES_API, type ServiceTier } from "./extensions/builtin/service-tier.ts";
 import { deriveExtensionRegistrationId } from "./extensions/builtin/tool-search/engine/marker.ts";
@@ -1072,6 +1077,7 @@ export class AgentSession {
 	private readonly _wakeSources = new WakeSourceTracker();
 	private _unsubscribeWakeSources: (() => void) | undefined;
 	private _overflowRecoveryAttempted = false;
+	private _autoCompactionSessionOverride: boolean | undefined;
 	private _compactionSkippedTooSmall = false;
 	private _requiredCompactionAdmissionError: RequiredCompactionError | undefined;
 	// Preserve provenance across agent-core's conversion of our admission error
@@ -1081,7 +1087,14 @@ export class AgentSession {
 	// A retry continuation immediately follows an accepted compaction. Its first
 	// response must not retrigger threshold compaction from stale provider usage.
 	private _skipNextPostRetryCompactionCheck = false;
-	private _blockedPostCompactionAssistant: { assistant: AssistantMessage; revision: number } | undefined;
+	/**
+	 * Armed when an accepted compaction produced a summary that still leaves the
+	 * context over budget. It survives synthetic revision bumps (model or settings
+	 * changes, queue mutation, extension continuations, scheduled retries) because
+	 * none of those change the context that was rejected; only a real reduction, a
+	 * new user prompt, or a manual compaction releases it (#7921 case 6).
+	 */
+	private _blockedPostCompactionAssistant: { assistant: AssistantMessage; contentTokens: number } | undefined;
 	private _delegatedCompactionKey: { provider: string; id: string } | undefined;
 	private _skipNextPostCompactionAssistantCheck = false;
 	private _scheduledContinuationRecompacted = false;
@@ -1391,7 +1404,7 @@ export class AgentSession {
 	 * session model so compaction never silently breaks.
 	 */
 	private _resolveCompactionModel(sessionModel: Model<any>): Model<any> {
-		const override = this.settingsManager.getCompactionSettings().model;
+		const override = this._getCompactionSettings().model;
 		if (!override) return sessionModel;
 		const slash = override.indexOf("/");
 		if (slash <= 0 || slash === override.length - 1) return sessionModel;
@@ -1799,6 +1812,33 @@ export class AgentSession {
 
 	private _incrementMessageRevision(): void {
 		this._messageRevision++;
+		// A revision bump alone is not evidence that the rejected context changed:
+		// releasing here let a synthetic bump retry the unchanged oversized context
+		// (#7921 case 6). Release only once the context actually shrank.
+		this._releaseBlockedPostCompactionAdmissionIfReduced();
+	}
+
+	/** Byte-derived size of the context an admission decision would carry. */
+	private _blockedAdmissionContentTokens(): number {
+		return estimateMessagesTokens(filterContextExcludedMessages(this.agent.state.messages));
+	}
+
+	/** A compaction that genuinely reduced the context clears the blocked state. */
+	private _releaseBlockedPostCompactionAdmissionIfReduced(): void {
+		const blocked = this._blockedPostCompactionAssistant;
+		if (blocked === undefined) return;
+		if (this._blockedAdmissionContentTokens() < blocked.contentTokens) {
+			this._blockedPostCompactionAssistant = undefined;
+		}
+	}
+
+	/**
+	 * Unconditional release for manual `/compact`, the user's explicit remedy. An
+	 * ordinary user prompt is deliberately not a release: it only adds context, so
+	 * it cannot make the rejected context admissible, and the pre-prompt gate
+	 * already owns its own fail-closed rejection for that route.
+	 */
+	private _releaseBlockedPostCompactionAdmission(): void {
 		this._blockedPostCompactionAssistant = undefined;
 	}
 
@@ -1854,7 +1894,7 @@ export class AgentSession {
 			systemPrompt: this.agent.state.systemPrompt,
 			tools: this.agent.state.tools,
 			liveContextTokens: this._getDownswitchLiveContextTokens(model),
-			compaction: this.settingsManager.getCompactionSettings(),
+			compaction: this._getCompactionSettings(),
 		});
 		return projection.usable ? undefined : projection;
 	}
@@ -2120,14 +2160,22 @@ export class AgentSession {
 		return resolveThresholdContextTokens(directContextTokens, estimateMessagesTokens(messages));
 	}
 
+	/**
+	 * `compaction.enabled=false` disables proactive (threshold) compaction only.
+	 * A provider-confirmed overflow is an error the session cannot progress past
+	 * by any other route, so overflow recovery stays armed regardless (#1422).
+	 */
 	private _getAutoCompactionReason(message: AssistantMessage): "overflow" | "threshold" | undefined {
-		const settings = this.settingsManager.getCompactionSettings();
-		if (!settings.enabled || message.stopReason === "aborted") {
+		const settings = this._getCompactionSettings();
+		if (message.stopReason === "aborted") {
 			return undefined;
 		}
 
 		const model = this.model;
-		if (!model || this._isAssistantFromBeforeLatestCompaction(message)) {
+		// Narrowed to the stale usage number itself: pre-boundary provenance does
+		// not exempt a context whose own content already exceeds the policy.
+		if (!model) return undefined;
+		if (this._isAssistantFromBeforeLatestCompaction(message) && !this._exceedsPolicyByContentEstimate()) {
 			return undefined;
 		}
 
@@ -2141,11 +2189,15 @@ export class AgentSession {
 			contextUsage !== undefined &&
 			contextUsage.tokens !== null &&
 			shouldCompact(contextUsage.tokens, contextUsage.contextWindow, settings);
-		if (isContextOverflow(message, model.contextWindow) && (sameModel || currentContextNeedsCompaction)) {
-			return "overflow";
+		const isOverflow =
+			(isContextOverflow(message, model.contextWindow) && (sameModel || currentContextNeedsCompaction)) ||
+			this._isCursorPayloadOverflow(message);
+		if (isOverflow) {
+			if (settings.enabled || isTurnStuckOnContextOverflow(message, model.contextWindow)) return "overflow";
+			return undefined;
 		}
-		if (this._isCursorPayloadOverflow(message)) {
-			return "overflow";
+		if (!settings.enabled) {
+			return undefined;
 		}
 
 		let contextTokens: number;
@@ -2165,13 +2217,31 @@ export class AgentSession {
 					usageMessage?.role === "assistant" &&
 					this._isAssistantFromBeforeLatestCompaction(usageMessage)
 				) {
-					return undefined;
+					// Drop only the stale usage number; the messages themselves still count.
+					const contentTokens = estimateMessagesTokens(messages);
+					return shouldCompact(contentTokens, model.contextWindow, settings) ? "threshold" : undefined;
 				}
 			}
 			contextTokens = estimate.tokens;
 		}
 
 		return shouldCompact(contextTokens, model.contextWindow, settings) ? "threshold" : undefined;
+	}
+
+	/**
+	 * Content measured by bytes, ignoring every provider usage number. The
+	 * stale-usage exemptions below only claim that a usage figure measured before
+	 * the accepted compaction boundary is not evidence of current pressure; they
+	 * must not exempt the messages themselves, because fresh post-boundary content
+	 * (a large tool result, late steering) is measurable without any usage report
+	 * (#7921 case 5).
+	 */
+	private _exceedsPolicyByContentEstimate(): boolean {
+		const model = this.model;
+		if (!model) return false;
+		const settings = this._getCompactionSettings();
+		const contextTokens = estimateMessagesTokens(filterContextExcludedMessages(this.agent.state.messages));
+		return shouldCompact(contextTokens, model.contextWindow, settings);
 	}
 
 	private _hasPendingPostCompactionUsageExemption(message: AssistantMessage): boolean {
@@ -4656,7 +4726,7 @@ export class AgentSession {
 			systemPrompt: this.agent.state.systemPrompt,
 			tools: this.agent.state.tools,
 			liveContextTokens,
-			compaction: this.settingsManager.getCompactionSettings(),
+			compaction: this._getCompactionSettings(),
 			includeSpeculationLead: options?.includeSpeculationLead,
 			admission: options?.admission,
 		});
@@ -4666,7 +4736,7 @@ export class AgentSession {
 	private _getDownswitchLiveContextTokens(model: Model<Api>): number {
 		const currentModel = this.model;
 		if (!currentModel) return 0;
-		const compaction = this.settingsManager.getCompactionSettings();
+		const compaction = this._getCompactionSettings();
 		const currentBudget = projectModelUsabilityBudget({
 			model: currentModel,
 			systemPrompt: this.agent.state.systemPrompt,
@@ -5506,12 +5576,11 @@ export class AgentSession {
 	async compact(customInstructions?: string): Promise<CompactionResult> {
 		const model = this.model;
 		if (!model) throw new Error(formatNoModelSelectedMessage());
+		// Manual compaction is the user's explicit remedy for a blocked admission
+		// (#7921 case 6).
+		this._releaseBlockedPostCompactionAdmission();
 		const pathEntries = this.sessionManager.getBranch();
-		const settings = cursorOverflowCompactionSettings(
-			this.settingsManager.getCompactionSettings(),
-			model.provider,
-			"manual",
-		);
+		const settings = cursorOverflowCompactionSettings(this._getCompactionSettings(), model.provider, "manual");
 		if (!prepareCompaction(pathEntries, settings)) {
 			const requestId = randomUUID();
 			const lastEntry = pathEntries[pathEntries.length - 1];
@@ -5774,7 +5843,7 @@ export class AgentSession {
 			}
 			const pathEntries = this.sessionManager.getBranch();
 			const settings = cursorOverflowCompactionSettings(
-				this.settingsManager.getCompactionSettings(),
+				this._getCompactionSettings(),
 				this.model?.provider,
 				request.reason,
 			);
@@ -6055,7 +6124,7 @@ export class AgentSession {
 			simulatedMessages = truncateToolResultBodies(simulatedMessages).messages ?? simulatedMessages;
 		}
 		const contextTokens = estimateMessagesTokens(filterContextExcludedMessages(simulatedMessages));
-		const settings = this.settingsManager.getCompactionSettings();
+		const settings = this._getCompactionSettings();
 		const reserveTokens =
 			settings.reserveScalingEnabled === false
 				? settings.reserveTokens
@@ -6188,16 +6257,13 @@ export class AgentSession {
 		inlineReason: "pre_prompt" | "threshold",
 		retryAfterCompaction = false,
 	): Promise<boolean> {
+		this._releaseBlockedPostCompactionAdmissionIfReduced();
 		const blockedAdmission = this._blockedPostCompactionAssistant;
-		if (
-			blockedAdmission !== undefined &&
-			blockedAdmission.assistant === assistantMessage &&
-			blockedAdmission.revision === this._messageRevision
-		) {
+		if (blockedAdmission !== undefined && blockedAdmission.assistant === assistantMessage) {
 			throw new RequiredCompactionError();
 		}
 
-		const settings = this.settingsManager.getCompactionSettings();
+		const settings = this._getCompactionSettings();
 		const model = this.model;
 		const contextTokens = estimateContextTokens(
 			filterContextExcludedMessages(this.sessionManager.buildSessionContext().messages),
@@ -6236,11 +6302,28 @@ export class AgentSession {
 	}
 
 	/**
+	 * Pending queued input the provider will also carry on this turn. Steering and
+	 * follow-up text enqueued after the admission projection was assembled - by a
+	 * `before_agent_start` handler, an extension action, or the user racing the
+	 * gate - is drained into the same run, so the final gate must measure it
+	 * (#7921 case 5).
+	 */
+	private _pendingQueuedInputMessages(): AgentMessage[] {
+		const timestamp = Date.now();
+		return [...this._steeringMessages, ...this._followUpMessages].map((text) => ({
+			role: "user" as const,
+			content: [{ type: "text" as const, text }],
+			timestamp,
+		}));
+	}
+
+	/**
 	 * The normal pre-prompt check only estimates persisted session context. This
 	 * final gate also includes turn-local messages which the provider will see:
-	 * the current prompt, next-turn custom messages, and before_agent_start
-	 * additions. Compaction rewrites only session context, so callers retain and
-	 * reapply their already-assembled one-shot additions after it succeeds.
+	 * the current prompt, next-turn custom messages, before_agent_start additions,
+	 * and steering or follow-up input queued after that projection was assembled.
+	 * Compaction rewrites only session context, so callers retain and reapply
+	 * their already-assembled one-shot additions after it succeeds.
 	 */
 	private async _enforceFinalProviderAdmission(messages: readonly AgentMessage[]): Promise<void> {
 		// User-only prompts are deliberately admitted without this gate: prompt
@@ -6248,18 +6331,23 @@ export class AgentSession {
 		// (issues #531/#886), so oversized user prompts rely on threshold
 		// compaction — which also samples the local transcript estimate — and on
 		// provider-overflow recovery. This gate closes the separate gap opened by
-		// turn-local custom additions, which the pre-prompt check cannot observe.
-		if (!messages.some((message) => message.role === "custom")) return;
+		// turn-local custom additions and by late queued input, neither of which the
+		// pre-prompt check can observe.
+		const lateQueuedMessages = this._pendingQueuedInputMessages();
+		if (!messages.some((message) => message.role === "custom") && lateQueuedMessages.length === 0) return;
 
 		const model = this.model;
 		if (!model) return;
-		const settings = this.settingsManager.getCompactionSettings();
-		const reserveTokens =
-			settings.reserveScalingEnabled === false
-				? settings.reserveTokens
-				: resolveReserveTokens(model.contextWindow, settings.reserveTokens);
+		const settings = this._getCompactionSettings();
+		const reserveTokens = resolveEffectiveReserveTokens(model.contextWindow, settings);
 		const isOversized = (): boolean => {
-			const providerMessages = filterContextExcludedMessages([...this.agent.state.messages, ...messages]);
+			const providerMessages = filterContextExcludedMessages([
+				...this.agent.state.messages,
+				...messages,
+				// Re-read the queues on every sample: this closure is evaluated again
+				// after compaction, when more input may have arrived.
+				...this._pendingQueuedInputMessages(),
+			]);
 			const estimate = estimateContextTokens(providerMessages);
 			const usageMessage = estimate.lastUsageIndex === null ? undefined : providerMessages[estimate.lastUsageIndex];
 			// Kept assistant usage can describe the pre-compaction request. Once a
@@ -6294,8 +6382,7 @@ export class AgentSession {
 		inlineReason?: "pre_prompt" | "threshold",
 		retryAfterCompaction = false,
 	): Promise<boolean> {
-		const settings = this.settingsManager.getCompactionSettings();
-		if (!settings.enabled) return false;
+		const settings = this._getCompactionSettings();
 
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return false;
@@ -6318,7 +6405,14 @@ export class AgentSession {
 		// compaction boundary. This prevents a stale pre-compaction usage/error
 		// from retriggering compaction on the first prompt after compaction.
 		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
-		if (this._isAssistantFromBeforeLatestCompaction(assistantMessage)) {
+		// The inline (pre-prompt) caller re-samples the current context itself and
+		// owns the fail-closed rejection, so only the automatic route needs the
+		// narrowed exemption here: fresh post-boundary content still counts even
+		// though this message's own usage predates the boundary (#7921 case 5).
+		if (
+			this._isAssistantFromBeforeLatestCompaction(assistantMessage) &&
+			(inlineReason !== undefined || !this._exceedsPolicyByContentEstimate())
+		) {
 			return false;
 		}
 		// Case 1: Overflow - LLM returned context overflow error.
@@ -6334,6 +6428,9 @@ export class AgentSession {
 			(isContextOverflow(assistantMessage, contextWindow) && (sameModel || currentContextNeedsCompaction)) ||
 			recoverableLength ||
 			this._isCursorPayloadOverflow(assistantMessage);
+		if (isOverflow && !settings.enabled && !isTurnStuckOnContextOverflow(assistantMessage, contextWindow)) {
+			return false;
+		}
 		if (
 			isOverflow &&
 			assistantMessage.stopReason === "stop" &&
@@ -6357,7 +6454,7 @@ export class AgentSession {
 				) {
 					this._blockedPostCompactionAssistant = {
 						assistant: assistantMessage,
-						revision: this._messageRevision,
+						contentTokens: this._blockedAdmissionContentTokens(),
 					};
 				}
 				return compacted;
@@ -6413,6 +6510,10 @@ export class AgentSession {
 			return compacted;
 		}
 
+		// Stuck-overflow recovery above runs regardless of the flag; threshold
+		// compaction below is the proactive path the user switched off (#1422).
+		if (!settings.enabled) return false;
+
 		// The first ordinary response can carry provider usage calculated before
 		// compaction. Consume that exemption only after proving this is not an
 		// overflow, then retain the decision for later admission re-sampling.
@@ -6423,6 +6524,7 @@ export class AgentSession {
 		// This ensures sessions that hit persistent API errors (e.g. 529) or malformed zero-usage
 		// responses can still compact and do not reset context accounting.
 		let contextTokens: number;
+		let staleUsageContentTokens: number | undefined;
 		if (inlineReason) {
 			const messages = filterContextExcludedMessages(this.sessionManager.buildSessionContext().messages);
 			contextTokens = estimateContextTokens(messages).tokens;
@@ -6443,10 +6545,12 @@ export class AgentSession {
 						usageMsg.role === "assistant" &&
 						this._isAssistantFromBeforeLatestCompaction(usageMsg)
 					) {
-						return false;
+						// Drop only the stale usage number; the messages themselves still count.
+						staleUsageContentTokens = estimateMessagesTokens(messages);
+						if (!shouldCompact(staleUsageContentTokens, contextWindow, settings)) return false;
 					}
 				}
-				contextTokens = estimate.tokens;
+				contextTokens = staleUsageContentTokens ?? estimate.tokens;
 			}
 		}
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
@@ -6467,7 +6571,7 @@ export class AgentSession {
 				) {
 					this._blockedPostCompactionAssistant = {
 						assistant: assistantMessage,
-						revision: this._messageRevision,
+						contentTokens: this._blockedAdmissionContentTokens(),
 					};
 				}
 				return compacted;
@@ -6564,7 +6668,7 @@ export class AgentSession {
 
 	private async _revalidateScheduledContinuationAdmission(): Promise<void> {
 		const model = this.model;
-		const settings = this.settingsManager.getCompactionSettings();
+		const settings = this._getCompactionSettings();
 		if (!model || !settings.enabled) return;
 
 		const canonicalMessages = filterContextExcludedMessages(this.sessionManager.buildSessionContext().messages);
@@ -6574,11 +6678,33 @@ export class AgentSession {
 			usageMessage?.role === "assistant" && this._isAssistantFromBeforeLatestCompaction(usageMessage)
 				? estimateMessagesTokens(canonicalMessages)
 				: estimate.tokens;
-		if (!shouldCompact(contextTokens, model.contextWindow, settings)) return;
+		// An explicit user prompt passes the proactive policy in the compaction
+		// extension's before_agent_start, which automatic continuations never emit.
+		// Sampling the same predicate here makes both routes compact at the same
+		// usage instead of letting a continuation ride past the threshold up to the
+		// hard valve (#7921 case 4).
+		const atHardLimit = shouldCompact(contextTokens, model.contextWindow, settings);
+		const overProactiveThreshold = shouldTriggerCompaction(
+			{
+				tokens: contextTokens,
+				contextWindow: model.contextWindow,
+				percent: model.contextWindow > 0 ? (contextTokens / model.contextWindow) * 100 : 0,
+			},
+			model.contextWindow,
+			settings,
+		);
+		if (!atHardLimit && !overProactiveThreshold) return;
 
 		const compacted = await this._runPrePromptCompaction(this._findLastAssistantMessage(), true, "pre_prompt");
 		if (!compacted) {
-			if (this._isCompactionOnCooldown() || this._isCompactionDelegated() || this._hasSupersedingCompactionClaim()) {
+			// Proactive pressure alone must never brick an automatic continuation:
+			// only the hard reserve valve stays fail-closed (#531/#886).
+			if (
+				!atHardLimit ||
+				this._isCompactionOnCooldown() ||
+				this._isCompactionDelegated() ||
+				this._hasSupersedingCompactionClaim()
+			) {
 				return;
 			}
 			throw new RequiredCompactionError();
@@ -6760,11 +6886,7 @@ export class AgentSession {
 
 			const preparation = prepareCompaction(
 				this.sessionManager.getBranch(),
-				cursorOverflowCompactionSettings(
-					this.settingsManager.getCompactionSettings(),
-					this.model?.provider,
-					reason,
-				),
+				cursorOverflowCompactionSettings(this._getCompactionSettings(), this.model?.provider, reason),
 				reason === "overflow",
 			);
 			if (!preparation) {
@@ -6850,11 +6972,20 @@ export class AgentSession {
 	}
 
 	/**
-	 * Toggle auto-compaction setting.
+	 * Toggle auto-compaction for this session only. Persisting the flag is a
+	 * settings-editor concern; a session-level command (RPC `set_auto_compaction`,
+	 * one thread of a multi-session host) must never rewrite the global setting
+	 * for every other session on the machine (#1422).
 	 */
 	setAutoCompactionEnabled(enabled: boolean): void {
-		this.settingsManager.setCompactionEnabled(enabled);
+		this._autoCompactionSessionOverride = enabled;
 		this._emitSessionSettingsChanged();
+	}
+
+	private _getCompactionSettings(): ReturnType<SettingsManager["getCompactionSettings"]> {
+		const settings = this.settingsManager.getCompactionSettings();
+		if (this._autoCompactionSessionOverride === undefined) return settings;
+		return { ...settings, enabled: this._autoCompactionSessionOverride };
 	}
 
 	private _emitSessionSettingsChanged(): void {
@@ -6866,9 +6997,9 @@ export class AgentSession {
 		});
 	}
 
-	/** Whether auto-compaction is enabled */
+	/** Whether auto-compaction is enabled for this session */
 	get autoCompactionEnabled(): boolean {
-		return this.settingsManager.getCompactionEnabled();
+		return this._autoCompactionSessionOverride ?? this.settingsManager.getCompactionEnabled();
 	}
 
 	async bindExtensions(bindings: ExtensionBindings): Promise<void> {
@@ -7124,6 +7255,7 @@ export class AgentSession {
 			{
 				getModel: () => this.model,
 				getServiceTier: () => this.serviceTier,
+				getEffectiveServiceTier: () => this.effectiveServiceTier,
 				getScopedModels: () => this._scopedModels,
 				isIdle: () => this.isIdle,
 				getAgentDir: () => this._agentDir,
@@ -7141,7 +7273,7 @@ export class AgentSession {
 					this._extensionShutdownHandler?.();
 				},
 				getContextUsage: () => this.getContextUsage(),
-				getCompactionSettings: () => this.settingsManager.getCompactionSettings(),
+				getCompactionSettings: () => this._getCompactionSettings(),
 				getPromptCacheSafeWaitSeconds: () => this.resolvePromptCacheSafeWaitSeconds(),
 				getPromptCacheGoalBackstopMaxSeconds: () => this.settingsManager.getPromptCacheGoalBackstopMaxSeconds(),
 				getPromptCacheKeepAliveSettings: () => this.settingsManager.getPromptCacheKeepAliveSettings(),
@@ -7700,6 +7832,14 @@ export class AgentSession {
 		);
 	}
 
+	private _takeNativeToolSearchInjectionFailure(): string | null {
+		try {
+			return getToolSearchService().takeNativeInjectionFailure();
+		} catch {
+			return null;
+		}
+	}
+
 	private _getProviderRetryDelayMs(errorMessage: string): number | undefined {
 		const markerMs = parseRetryAfterMsMarker(errorMessage);
 		if (markerMs !== undefined) return markerMs;
@@ -7832,9 +7972,13 @@ export class AgentSession {
 		const hardErrorFallback = options.hardErrorFallback === true;
 		const sameModelRemint = options.sameModelRemint === true;
 		let switchedFallback = false;
+		let sameModelNativeRecovery = false;
 		let is429TierRouted = false;
 		let hintTierDelayMs: number | undefined;
-		const tryFallback = async (reason: Parameters<typeof this._retryFallback.tryFallback>[0], failure: Parameters<typeof this._retryFallback.tryFallback>[1]) => {
+		const tryFallback = async (
+			reason: Parameters<typeof this._retryFallback.tryFallback>[0],
+			failure: Parameters<typeof this._retryFallback.tryFallback>[1],
+		) => {
 			try {
 				return await this._retryFallback.tryFallback(reason, failure);
 			} catch (error) {
@@ -7862,25 +8006,37 @@ export class AgentSession {
 				return "not-handled";
 			}
 		} else if (hardErrorFallback) {
-			// A non-retryable provider failure must never replay on the same model.
-			// Billing-class failures never recover on this account, so the fallback
-			// switch pins as the session model instead of reverting after the cooldown.
-			const reason = isBillingErrorMessage(errorMessage) ? "billing" : "hard-error";
-			switchedFallback = await tryFallback(reason, { errorMessage });
-			if (!switchedFallback) {
-				const exhaustedChainKey = this._retryFallback.exhaustedChainKey;
-				if (exhaustedChainKey) {
-					this._emit({
-						type: "retry_fallback_exhausted",
-						chainKey: exhaustedChainKey,
-						lastError: errorMessage,
-					});
+			// A rejected native tool-search request is recoverable in place: the
+			// adapter is disabled for the session on the 400, so the SAME model can
+			// succeed on the immediate next attempt and the fallback chain must not
+			// demote the user to a weaker model. The pending flag is consumed once,
+			// so a second rejection takes the ordinary hard-error path below.
+			const nativeSearchFailure = this._takeNativeToolSearchInjectionFailure();
+			if (nativeSearchFailure !== null) {
+				sameModelNativeRecovery = true;
+				// The recovery starts fresh, mirroring the fallback branch's attempt bookkeeping.
+				this._retryAttempt = 1;
+			} else {
+				// A non-retryable provider failure must never replay on the same model.
+				// Billing-class failures never recover on this account, so the fallback
+				// switch pins as the session model instead of reverting after the cooldown.
+				const reason = isBillingErrorMessage(errorMessage) ? "billing" : "hard-error";
+				switchedFallback = await tryFallback(reason, { errorMessage });
+				if (!switchedFallback) {
+					const exhaustedChainKey = this._retryFallback.exhaustedChainKey;
+					if (exhaustedChainKey) {
+						this._emit({
+							type: "retry_fallback_exhausted",
+							chainKey: exhaustedChainKey,
+							lastError: errorMessage,
+						});
+					}
+					this._resolveRetry();
+					return "not-handled";
 				}
-				this._resolveRetry();
-				return "not-handled";
+				// The fallback starts fresh; the failed model's transient attempts do not carry over.
+				this._retryAttempt = 1;
 			}
-			// The fallback starts fresh; the failed model's transient attempts do not carry over.
-			this._retryAttempt = 1;
 		} else if (isRefusal) {
 			// Refusals are only retried through a new chain candidate. They never use
 			// same-model retries or the transient over-budget fallback escape hatch.
@@ -8176,11 +8332,12 @@ export class AgentSession {
 			this._retryAttempt,
 			this._retryRandom(),
 		);
-		const delayMs = switchedFallback
-			? 0
-			: is429TierRouted
-				? (hintTierDelayMs ?? providerDelayMs ?? localExponentialMs)
-				: (nonTierProviderDelayMs ?? localExponentialMs);
+		const delayMs =
+			switchedFallback || sameModelNativeRecovery
+				? 0
+				: is429TierRouted
+					? (hintTierDelayMs ?? providerDelayMs ?? localExponentialMs)
+					: (nonTierProviderDelayMs ?? localExponentialMs);
 		// Prepare before auto_retry_start so an immediate Esc can cancel the retry sleep.
 		this._retryAbortController = new AbortController();
 
@@ -8228,7 +8385,7 @@ export class AgentSession {
 		// the prior retry checks. Revalidate canonical session context immediately
 		// before the continuation so a rejected compaction never admits that model.
 		const model = this.model;
-		const compactionSettings = this.settingsManager.getCompactionSettings();
+		const compactionSettings = this._getCompactionSettings();
 		const contextTokens = estimateContextTokens(
 			filterContextExcludedMessages(this.sessionManager.buildSessionContext().messages),
 		).tokens;

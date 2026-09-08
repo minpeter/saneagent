@@ -8,6 +8,61 @@
 
 ### Changed
 
+### Fixed
+
+### Removed
+
+## [2026.9.8] - 2026-09-08
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+- The eval tool description teaches cell mechanics only (batch independent calls, real code, failures kept verbatim, truncated output re-read) and drops the "default execution surface / never a chain / distilled facts only" wording; routing lives in the model's prompt preset.
+
+### Fixed
+
+### Removed
+
+## [2026.9.7-2] - 2026-09-07
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+- The JS kernel's shell capture now pins the worker's environment view for `Bun.spawnSync` as well as `Bun.spawn`, so a cell calling it without an explicit `env` sees the session's `PI_*` values instead of the inherited OS environ.
+- Eval kernels and every child they spawn now see the active session's `PI_*` environment (`PI_SESSION_ID`, `PI_SESSION_FILE`, `PI_PROVIDER`, `PI_MODEL`, `PI_REASONING_LEVEL`) exactly as bash-tool children do: inherited `PI_*` values are dropped before the session values are applied, so subprocesses such as `omo-agent-toolkit ulw-loop` resolve the same session as the `bash` tool instead of a cwd-global one.
+- JavaScript eval cells no longer lose their completion value when a nested function, callback, or try/catch helper contains `return`: the cell wrapper now skips last-expression capture only for a genuine top-level `return`, and a property named `return` no longer primes the statement scanner as the keyword (#1439).
+- Eval output truncation notices now name the real cause: a width-clamped line reports `N line(s) clamped to M columns (… dropped)`, a byte-capped tail reports the actual cap, and a notice never presents the output's own size as a limit.
+
+### Removed
+
+## [2026.9.7] - 2026-09-07
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.6] - 2026-09-06
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
 - The Bun eval description now tells the model to shell out through `Bun.$` or `Bun.spawn` and never `Bun.spawnSync`, because a synchronous child blocks the worker and a stop or timeout then loses every variable.
 - JavaScript eval cells now interrupt cooperatively: `stop` and kernel timeouts first ask the worker to settle the cell (pending bridge `tool.*` calls are rejected, `Bun.spawn` children are killed) and keep the worker VM and its globals when the cell settles within a 2 s grace; only an unsettled cell restarts the worker.
 

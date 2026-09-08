@@ -1,5 +1,85 @@
 # goal Extension Changes
 
+## 2026-09-08 - Recover malformed empty tool-use turns
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/goal/continuation.ts`: distinguish `toolUse` assistant turns with no tool-call blocks from intentional tool termination and admit only the malformed case on immediate continuation.
+- `packages/coding-agent/src/core/extensions/builtin/goal/agent-end-continuation.ts`: route malformed empty tool-use turns through `providerRecovery`.
+- `packages/coding-agent/src/core/extensions/builtin/goal/monitor-continuation.ts` and `packages/coding-agent/src/core/extensions/builtin/goal/lifecycle-helpers.ts`: populate the malformed-turn fact in every verdict input.
+- `packages/coding-agent/test/suite/goal-continuation-verdict.test.ts`: cover malformed and intentional tool-use verdicts.
+
+### Why
+
+- A provider can emit `toolUse` without any tool-call block. Nothing executed, so treating it as a deliberate terminating tool leaves an active goal permanently stalled.
+
+### Why an extension could not handle this
+
+- The built-in goal extension owns agent-end admission and its recovery routing.
+
+### Expected merge conflict zones
+
+- LOW: continuation eligibility and agent-end verdict-input construction.
+
+## 2026-09-08 - The monitor backstop is a periodic re-check again, default 270s
+
+### What changed
+
+- `cache-warm.ts`: `GOAL_MONITOR_BACKSTOP_DEFAULT_DELAY_MS` is 270_000 (the 5m Anthropic prompt-cache TTL minus the 30s safety buffer) instead of 3_570_000. `resolveGoalMonitorContinuationDelayMs` is otherwise unchanged: it still takes only `goalBackstopMaxSeconds`, never the prompt-cache safe wait, and clamps into [1s, 1h].
+- `monitor-continuation.ts`: no code change; the `#schedule` comment now describes the backstop as the periodic re-check floor under the drain fire.
+- The mirrors of the default moved with it: `core/settings-manager.ts` `getPromptCacheGoalBackstopMaxSeconds()` (270), `core/settings-shapes.ts`, `core/extensions/runner.ts`, and the fake contexts in `test/suite/goal-monitor-test-harness.ts` and `test/suite/goal-ticker-stale-context.test.ts`.
+- `cache-keepalive/index.ts`: comment only; the loop stays decoupled from the goal timer because the configured backstop may still sit past the TTL.
+
+### Why
+
+- A wake source can be misconfigured - a monitor filter that never matches, a stream that never ends, a background job that never exits. With the 3570s default from 2026-09-07 (code-yeongyu/oh-my-openagent#7720) such a goal parked for an hour before it could notice. The owner decided that a full re-check turn every 4m30s is the right price for never stranding a goal on a source that will not deliver. The event-driven drain fire stays the normal path, and a wait you trust can opt back into the cheaper long backstop with `promptCache.goalBackstopMaxSeconds: 3570`.
+
+### Why an extension could not handle it
+
+- The delay is chosen inside the built-in goal continuation coordinator, which owns the wake-source ledger, the single-flight timer, and the admission verdict. No extension hook can observe or replace that timer.
+
+### Expected merge conflict zones
+
+- LOW: the `GOAL_MONITOR_BACKSTOP_DEFAULT_DELAY_MS` constant and its doc comment in `cache-warm.ts`.
+- LOW: the `resolveGoalMonitorContinuationDelayMs` docstring and the `#schedule` comment.
+
+## 2026-09-07 - The monitor wait is a stall backstop, not a cache-warm cadence (code-yeongyu/oh-my-openagent#7720)
+
+### What changed
+
+- `cache-warm.ts`: `resolveGoalMonitorContinuationDelayMs` takes only `goalBackstopMaxSeconds` and no longer reads the prompt-cache safe wait. It returns `goalBackstopMaxSeconds * 1000` (default `GOAL_MONITOR_BACKSTOP_DEFAULT_DELAY_MS`, 3_570_000, for a missing, non-finite, or non-positive setting) clamped into [1s, 1h]. `GOAL_MONITOR_CONTINUATION_FALLBACK_DELAY_MS` stays exported as the accounting fallback for a continuation whose scheduled delay is no longer known; it is never the armed delay.
+- `monitor-continuation.ts`: `#schedule` passes only `getPromptCacheGoalBackstopMaxSeconds()`, so a live wake source arms the stall backstop instead of a ~270s cache-safe timer. The drain fire in `#setWakeSourceCount` (1s after the last wake source reaches zero) stays the single normal continuation path, and the backstop still admits one continuation if it fires while sources are live. `GOAL_MONITOR_BACKSTOP_DEFAULT_DELAY_MS` is re-exported here for callers and tests.
+- `cache-warm-renderer.ts`: the scheduled notice says "Stall backstop ... - the goal resumes as soon as a wake source delivers" instead of claiming the timed wake keeps the prompt cache warm. Event names (`goal_continuation_scheduled`, `goal_continuation_resumed`, `goal_continuation_timer_state`) and the `goal-cache-warmup` entry type are unchanged, because omo-desktop-app consumes them.
+
+### Why
+
+- With the default 5m Anthropic TTL the backstop was a 270s timer, and every firing admitted a `monitorDelayed` continuation - a full main-model turn - even though wake sources were still live. The turn ended, `afterAgentEnd` re-armed the timer, and the session paid for the whole accumulated context every ~4m30s for as long as it waited, with no progress to show for it. The wait exists to let the wake sources deliver; a timer is only needed to break a stall.
+
+### Why an extension could not handle it
+
+- The delay is chosen inside the built-in goal continuation coordinator, which owns the wake-source ledger, the single-flight timer, and the admission verdict. No extension hook can observe or replace that timer.
+
+### Expected merge conflict zones
+
+- LOW: the `resolveGoalMonitorContinuationDelayMs` signature and its single call site in `#schedule`.
+- LOW: the scheduled-phase `whyLine` string in `cache-warm-renderer.ts`.
+
+## 2026-09-07 - Block continuation after an unrecovered context overflow (#1422)
+
+### What changed
+
+- `continuation.ts`: `GoalContinuationInput.lastTurnStuckOnContextOverflow` and the `context-overflow` deny reason; `evaluateGoalContinuation` denies on every automatic path when the last turn was stuck on a context overflow, before eligibility.
+- `continuation-recovery.ts`: `CONTEXT_OVERFLOW_BLOCKED_REASON` ("context overflow ended the turn (compaction did not recover)") joins the mechanical blocks, so accepted direct input resumes the goal.
+- `lifecycle-helpers.ts` / `monitor-continuation.ts`: the verdict input derives the flag from the last assistant message through `core/compaction/stuck-overflow.ts` (agent-end paths and session-start).
+
+### Why
+
+- A provider overflow was treated like any terminal provider error: `providerRecovery` re-sent the identical context and the provider rejected it identically, three times in 30 s in the reported session. The context does not change between attempts, so re-prompting is deterministic failure.
+
+### Expected merge conflict zones
+
+- LOW: the verdict input type, the deny-reason union, and `blockedReasonForContinuationGuard`.
+
 ## 2026-09-04 - update_goal points at the audits instead of restating them
 
 ### What changed

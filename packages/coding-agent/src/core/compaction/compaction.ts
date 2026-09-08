@@ -24,6 +24,7 @@ import type {
 } from "@earendil-works/pi-ai/compat";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import { estimateContextTokens as estimateProviderContextTokens } from "@earendil-works/pi-ai/utils/estimate";
+import { resolveEffectiveReserveTokens } from "../extensions/builtin/compaction/policy.ts";
 import { convertToLlm, filterContextExcludedMessages, isContextExcludedCustomMessage } from "../messages.ts";
 import {
 	buildSessionContext,
@@ -335,7 +336,7 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
  */
 export function shouldCompact(contextTokens: number, contextWindow: number, settings: CompactionSettings): boolean {
 	if (!settings.enabled) return false;
-	return contextTokens > contextWindow - settings.reserveTokens;
+	return contextTokens > contextWindow - resolveEffectiveReserveTokens(contextWindow, settings);
 }
 
 // ============================================================================

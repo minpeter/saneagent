@@ -12,6 +12,62 @@
 
 ### Removed
 
+## [2026.9.8] - 2026-09-08
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+- Anthropic OAuth login no longer dead-ends on a browser page reading "State mismatch." when another senpi/omo process on the same machine still holds the callback port 53692: the login binds an ephemeral loopback port instead and carries that port through the auth URL and the token exchange. A callback that belongs to another login now explains that the login belongs to a different session and how to continue, and a login that gets neither a browser callback nor a pasted redirect URL for 10 minutes times out and releases its port instead of holding it indefinitely.
+
+- Anthropic mid-output server fallback now follows the configured abort/continue policy instead of raising an unsupported-fallback error. Continuing responses retain their serving-model identity and do not execute abandoned pre-fallback tools, including through text-tool recovery middleware.
+
+- `streamSimple` on the OpenAI Responses and Codex Responses adapters forwards the new `SimpleStreamOptions.serviceTier` into the request (`service_tier`) and tier-aware usage pricing; the simple path previously dropped it (code-yeongyu/oh-my-openagent#6795).
+
+### Removed
+
+## [2026.9.7-2] - 2026-09-07
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+- Fixed context-overflow classification so OpenAI's "exceeds the model's context window" wording is detected and token-quota / rate-limit messages that mention tokens are not treated as overflow (code-yeongyu/oh-my-openagent#7921).
+
+### Removed
+
+## [2026.9.7] - 2026-09-07
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.6] - 2026-09-06
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
 ## [2026.9.5-3] - 2026-09-05
 
 ### Breaking Changes

@@ -1,7 +1,13 @@
 import { createHash, randomBytes } from "node:crypto";
 import { type FSWatcher, watch } from "node:fs";
-import { access, type FileHandle, lstat, open, realpath, stat } from "node:fs/promises";
+import { access, type FileHandle, lstat, open, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
+import { canonicalWatchPath, probeDirectoryOpenable } from "../../../../utils/fs-watch.ts";
+import { realpathWithoutOpen } from "../../../../utils/paths.ts";
+import type {
+	TerminalMonitorEndedEvent as MonitorEndedEvent,
+	TerminalMonitorEndedReason as MonitorEndedReason,
+} from "../monitor-state-event.ts";
 import type { TerminalRuntimeSession } from "./runtime-session.ts";
 import { DEFAULT_DURABLE_MONITOR_FIRE_BUDGET, FIRE_BUDGET_AUTO_MUTE_SUMMARY, FIRE_BUDGET_WINDOW_MS } from "./shared.ts";
 import type { MonitorDurabilityClass } from "./terminal-manifest.ts";
@@ -57,14 +63,26 @@ export interface MonitorSnapshotEntry {
 	readonly paused: boolean;
 	/** Epoch milliseconds when the watch registered; feeds the footer's live elapsed label. */
 	readonly startedAtMs: number;
+	readonly command?: string | null;
+	readonly filter?: string | null;
+	readonly persistent?: boolean;
+	readonly deadlineMs?: number | null;
+	readonly fireCount?: number;
+	readonly lastFiredAtMs?: number | null;
 	/** Durability deadline of a restart-surviving watch; undefined for every ephemeral one. */
 	readonly expiresAt?: number;
 	readonly fireWindow?: MonitorFireWindow;
 }
 
+export type { MonitorEndedEvent, MonitorEndedReason };
+
 export interface MonitorRegistryOptions {
 	/** Observes every registry transition (register/pause/rearm/settle/dispose) with the live snapshot. */
 	readonly onChange?: (snapshot: readonly MonitorSnapshotEntry[]) => void;
+	/** Fire-stat refreshes are separate from lifecycle transitions (which persist the manifest). */
+	readonly onFire?: (snapshot: readonly MonitorSnapshotEntry[]) => void;
+	/** Observes each monitor exactly once when it leaves the registry. */
+	readonly onEnded?: (event: MonitorEndedEvent) => void;
 	/** Reserves one shared terminal capacity slot for a native watch. */
 	readonly reserve?: () => (() => void) | null;
 }
@@ -72,6 +90,8 @@ export interface MonitorRegistryOptions {
 export interface RegisterFileMonitorOptions {
 	readonly description: string;
 	readonly path: string;
+	readonly persistent?: boolean;
+	readonly deadlineMs?: number | null;
 	/** Caller-supplied stable identity so a restore can re-bind the same "mon_" id. */
 	readonly monitorId?: string;
 	readonly event: "create" | "modify";
@@ -84,6 +104,9 @@ export interface RegisterFileMonitorOptions {
 
 export interface RegisterMonitorOptions {
 	readonly id: string;
+	readonly command?: string | null;
+	readonly persistent?: boolean;
+	readonly deadlineMs?: number | null;
 	/** Caller-supplied stable identity so a restore can re-bind the same "mon_" id. */
 	readonly monitorId?: string;
 	readonly description: string;
@@ -110,6 +133,12 @@ interface FileMonitorRecord {
 	readonly sessionId: string;
 	readonly description: string;
 	readonly startedAtMs: number;
+	readonly command: null;
+	readonly filter: null;
+	readonly persistent: boolean;
+	readonly deadlineMs: number | null;
+	fireCount: number;
+	lastFiredAtMs: number | null;
 	readonly expiresAt: number | undefined;
 	readonly path: string;
 	readonly canonicalPath: string;
@@ -140,6 +169,11 @@ interface MonitorRecord {
 	readonly sessionId: string;
 	readonly description: string;
 	readonly startedAtMs: number;
+	readonly command: string | null;
+	readonly persistent: boolean;
+	readonly deadlineMs: number | null;
+	fireCount: number;
+	lastFiredAtMs: number | null;
 	readonly expiresAt: number | undefined;
 	readonly runtime: TerminalRuntimeSession;
 	readonly filter: RegExp | undefined;
@@ -161,6 +195,8 @@ export class MonitorRegistry {
 	readonly #records = new Map<string, MonitorRecord>();
 	readonly #emit: (event: MonitorEvent) => void;
 	readonly #onChange: ((snapshot: readonly MonitorSnapshotEntry[]) => void) | undefined;
+	readonly #onEnded: ((event: MonitorEndedEvent) => void) | undefined;
+	readonly #onFire: ((snapshot: readonly MonitorSnapshotEntry[]) => void) | undefined;
 	readonly #reserve: (() => (() => void) | null) | undefined;
 	readonly #files = new Map<string, FileMonitorRecord>();
 	#nextFileId = 1;
@@ -172,6 +208,8 @@ export class MonitorRegistry {
 	constructor(emit: (event: MonitorEvent) => void, options?: MonitorRegistryOptions) {
 		this.#emit = emit;
 		this.#onChange = options?.onChange;
+		this.#onEnded = options?.onEnded;
+		this.#onFire = options?.onFire;
 		this.#reserve = options?.reserve;
 	}
 
@@ -182,6 +220,12 @@ export class MonitorRegistry {
 			description: record.description,
 			paused: record.paused,
 			startedAtMs: record.startedAtMs,
+			command: record.command,
+			filter: record.filter?.source ?? null,
+			persistent: record.persistent,
+			deadlineMs: record.deadlineMs,
+			fireCount: record.fireCount,
+			lastFiredAtMs: record.lastFiredAtMs,
 			expiresAt: record.expiresAt,
 			fireWindow: "fireWindow" in record ? record.fireWindow : undefined,
 		}));
@@ -208,7 +252,9 @@ export class MonitorRegistry {
 		let approvedParent: string;
 		try {
 			await this.#registrationAwait(pending, access(parent));
-			approvedParent = await this.#registrationAwait(pending, realpath(parent));
+			// Identity is derived without open(2), with the same walker the permission parser used, so the
+			// two sides agree byte-for-byte and neither can block on a wedged mount.
+			approvedParent = realpathWithoutOpen(parent);
 			const approvedParentAtPermission = options.approvedParent;
 			if (approvedParentAtPermission !== undefined && approvedParent !== approvedParentAtPermission) {
 				throw new Error(`Cannot watch file: parent directory changed during permission approval: ${parent}`);
@@ -235,7 +281,7 @@ export class MonitorRegistry {
 			});
 			initial = await this.#registrationAwait(pending, initialHandle.stat());
 			if (!initial.isFile()) throw new Error(`Cannot watch file: target is not a regular file: ${path}`);
-			const resolvedTarget = await this.#registrationAwait(pending, realpath(path));
+			const resolvedTarget = realpathWithoutOpen(path);
 			if (resolvedTarget !== join(approvedParent, basename(path)))
 				throw new Error(`Cannot watch file: target identity changed: ${path}`);
 			const rebound = await this.#registrationAwait(pending, lstat(path));
@@ -260,11 +306,14 @@ export class MonitorRegistry {
 		const id = `watch_${this.#nextFileId++}`;
 		let watcher: FSWatcher;
 		try {
-			const activationParent = await this.#registrationAwait(pending, realpath(parent));
+			const activationParent = realpathWithoutOpen(parent);
 			if (activationParent !== approvedParent) {
 				throw new Error(`Cannot watch file: parent directory changed during registration: ${parent}`);
 			}
-			watcher = watch(activationParent, (_kind, name) => {
+			// watch() opens the directory synchronously on this thread; prove the open completes on the
+			// async pool first so a wedged mount fails at the registration deadline instead of freezing.
+			await this.#registrationAwait(pending, probeDirectoryOpenable(activationParent));
+			watcher = watch(canonicalWatchPath(activationParent), (_kind, name) => {
 				if (!name || basename(String(name)) === basename(path)) void this.#checkFile(id);
 			});
 		} catch (error) {
@@ -328,6 +377,15 @@ export class MonitorRegistry {
 			sessionId: id,
 			description: options.description,
 			startedAtMs: Date.now(),
+			command: null,
+			filter: null,
+			persistent: options.persistent ?? options.expiresAt !== undefined,
+			deadlineMs:
+				(options.persistent ?? options.expiresAt !== undefined)
+					? null
+					: (options.deadlineMs ?? Date.now() + options.timeoutMs),
+			fireCount: 0,
+			lastFiredAtMs: null,
 			expiresAt: options.expiresAt,
 			path,
 			canonicalPath,
@@ -377,7 +435,7 @@ export class MonitorRegistry {
 	emitFileLine(id: string, line: string): boolean {
 		const record = this.#files.get(id);
 		if (!record || record.settled) return false;
-		this.#emit({ type: "line", id: record.id, description: record.description, line });
+		this.#emitForRecord(record, { type: "line", id: record.id, description: record.description, line });
 		return true;
 	}
 
@@ -405,7 +463,16 @@ export class MonitorRegistry {
 		record.release();
 		this.#files.delete(record.id);
 		this.#notifyChange();
-		this.#emit({ type: "summary", id: record.id, description: record.description, summary });
+		this.#emitForRecord(record, { type: "summary", id: record.id, description: record.description, summary });
+		const reason =
+			summary === "watcher timed_out"
+				? "timeout"
+				: summary === "watcher killed"
+					? "killed"
+					: summary === "watcher disposed"
+						? "disposed"
+						: "exit";
+		this.#emitEnded(record, reason, null);
 	}
 
 	async #checkFile(id: string): Promise<void> {
@@ -443,14 +510,14 @@ export class MonitorRegistry {
 		let current: Awaited<ReturnType<typeof stat>> | null = null;
 		let handle: FileHandle | undefined;
 		try {
-			const currentParent = await realpath(dirname(record.path));
+			const currentParent = realpathWithoutOpen(dirname(record.path));
 			if (currentParent !== record.canonicalParent) {
 				this.#settleFile(record, `watcher error: monitored parent changed: ${dirname(record.path)}`);
 				return;
 			}
 			const target = await lstat(record.canonicalPath);
 			if (target.isSymbolicLink()) throw new Error(`Cannot watch file: target identity changed: ${record.path}`);
-			const resolvedTarget = await realpath(record.canonicalPath);
+			const resolvedTarget = realpathWithoutOpen(record.canonicalPath);
 			if (resolvedTarget !== record.canonicalPath)
 				throw new Error(`Cannot watch file: target identity changed: ${record.path}`);
 			handle = await open(record.canonicalPath, "r");
@@ -502,7 +569,7 @@ export class MonitorRegistry {
 		if (!record.pendingChange || record.paused || record.settled) return;
 		record.pendingChange = false;
 		if (record.settled) return;
-		this.#emit({
+		this.#emitForRecord(record, {
 			type: "line",
 			id: record.id,
 			description: record.description,
@@ -519,6 +586,11 @@ export class MonitorRegistry {
 			sessionId: options.id,
 			description: options.description,
 			startedAtMs: Date.now(),
+			command: options.command ?? null,
+			persistent: options.persistent ?? durable,
+			deadlineMs: (options.persistent ?? durable) ? null : (options.deadlineMs ?? null),
+			fireCount: 0,
+			lastFiredAtMs: null,
 			expiresAt: options.expiresAt,
 			runtime: options.runtime,
 			filter: options.filter,
@@ -601,7 +673,7 @@ export class MonitorRegistry {
 	dispose(): void {
 		this.#disposed = true;
 		this.#lifecycle += 1;
-		for (const record of this.#records.values()) this.#disposeRecord(record);
+		for (const record of [...this.#records.values()]) this.#disposeRecord(record);
 		for (const record of this.#files.values()) this.#settleFile(record, "watcher disposed");
 		for (const pending of this.#pending) this.#finishPending(pending);
 		this.#records.clear();
@@ -696,7 +768,7 @@ export class MonitorRegistry {
 				record.mutedDropped += 1;
 				continue;
 			}
-			this.#emit({ type: "line", id: record.id, description: record.description, line });
+			this.#emitForRecord(record, { type: "line", id: record.id, description: record.description, line });
 			if (record.fireWindow !== undefined) {
 				const now = Date.now();
 				if (now - record.fireWindow.startMs >= FIRE_BUDGET_WINDOW_MS)
@@ -704,7 +776,7 @@ export class MonitorRegistry {
 				record.fireWindow.count += 1;
 				if (record.fireWindow.count >= DEFAULT_DURABLE_MONITOR_FIRE_BUDGET) {
 					record.paused = true;
-					this.#emit({
+					this.#emitForRecord(record, {
 						type: "summary",
 						id: record.id,
 						description: record.description,
@@ -727,17 +799,41 @@ export class MonitorRegistry {
 		const status = describeExit(record.runtime) ?? "exited";
 		const code = record.runtime.exitResult?.exitCode;
 		const codeText = code === null || code === undefined ? "" : ` (exit code ${code})`;
-		this.#emit({
+		this.#emitForRecord(record, {
 			type: "summary",
 			id: record.id,
 			description: record.description,
 			summary: `watcher ${status}${codeText}`,
 		});
+		const exit = record.runtime.exitResult;
+		this.#emitEnded(record, exit?.timedOut ? "timeout" : exit?.cancelled ? "killed" : "exit", code ?? null);
 	}
 
 	#disposeRecord(record: MonitorRecord): void {
+		if (record.settled) return;
 		record.settled = true;
 		record.unsubscribeOutput?.();
 		record.unsubscribeExit?.();
+		this.#records.delete(record.id);
+		this.#emitEnded(record, "disposed", null);
+	}
+
+	#emitForRecord(record: MonitorRecord | FileMonitorRecord, event: MonitorEvent): void {
+		record.fireCount += 1;
+		record.lastFiredAtMs = Date.now();
+		this.#emit(event);
+		if (!record.settled) this.#onFire?.(this.snapshot());
+	}
+
+	#emitEnded(record: MonitorRecord | FileMonitorRecord, reason: MonitorEndedReason, exitCode: number | null): void {
+		this.#onEnded?.({
+			id: record.id,
+			description: record.description,
+			startedAtMs: record.startedAtMs,
+			endedAtMs: Date.now(),
+			reason,
+			exitCode,
+			fireCount: record.fireCount,
+		});
 	}
 }

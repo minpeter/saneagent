@@ -12,7 +12,10 @@ import {
 } from "./cache-warm.ts";
 import { subscribeGoalChannelState } from "./channel-state-subscriptions.ts";
 
-export { GOAL_MONITOR_CONTINUATION_FALLBACK_DELAY_MS } from "./cache-warm.ts";
+export {
+	GOAL_MONITOR_BACKSTOP_DEFAULT_DELAY_MS,
+	GOAL_MONITOR_CONTINUATION_FALLBACK_DELAY_MS,
+} from "./cache-warm.ts";
 
 import {
 	continuationTurnUsedTools,
@@ -22,12 +25,14 @@ import {
 	type GoalContinuationPath,
 	hasGoalContinuationProgress,
 	hashAssistantText,
+	isMalformedToolUseTurn,
 	normalizeAssistantText,
 } from "./continuation.ts";
 import { lastAssistantMessage } from "./last-assistant-message.ts";
 import {
 	admitAndQueueGoalContinuation,
 	buildCurrentGoalContinuationSignature,
+	isLastTurnStuckOnContextOverflow,
 	lastAssistantText,
 } from "./lifecycle-helpers.ts";
 import type {
@@ -322,12 +327,13 @@ export class MonitorAwareGoalContinuation {
 
 	#schedule(goal: Goal, kind: DelayedContinuationKind): void {
 		if (this.#scheduledContinuationKind !== undefined) return;
+		// A live wake source arms the periodic backstop only: the normal resumption
+		// is the drain fire in #setWakeSourceCount, and the backstop re-checks the
+		// goal every `promptCache.goalBackstopMaxSeconds` in case the source never
+		// delivers.
 		const delayMs =
 			kind === "monitor"
-				? resolveGoalMonitorContinuationDelayMs(
-						this.#ctx?.getPromptCacheSafeWaitSeconds?.(),
-						this.#ctx?.getPromptCacheGoalBackstopMaxSeconds?.(),
-					)
+				? resolveGoalMonitorContinuationDelayMs(this.#ctx?.getPromptCacheGoalBackstopMaxSeconds?.())
 				: GOAL_USER_GRACE_DELAY_MS;
 		this.#scheduledDelayMs = delayMs;
 		if (kind === "monitor") {
@@ -503,6 +509,7 @@ export class MonitorAwareGoalContinuation {
 			hasPendingMessages: ctx.hasPendingMessages(),
 			path,
 			lastStopReason: lastAssistant?.stopReason,
+			lastTurnWasMalformedToolUse: lastAssistant?.role === "assistant" && isMalformedToolUseTurn(lastAssistant),
 			consecutiveContinuations: goal.consecutiveContinuations ?? 0,
 			lastContinuationSignature: goal.lastContinuationSignature,
 			currentSignature: buildCurrentGoalContinuationSignature(ctx, goal, lastAssistantText(messages)),
@@ -510,6 +517,7 @@ export class MonitorAwareGoalContinuation {
 			recentNormalizedOutputHashes: this.#recentNormalizedOutputHashes,
 			toollessContinuationStreak: this.#toollessContinuationStreak,
 			continuationPending: this.#isContinuationPending(),
+			lastTurnStuckOnContextOverflow: isLastTurnStuckOnContextOverflow(ctx, lastAssistant),
 		};
 	}
 

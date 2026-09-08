@@ -525,7 +525,23 @@ describe("interactive host runtime", () => {
 			expect(runtime.session.isFastModeActive()).toBe(false);
 			expect(runtime.session.serviceTier).toBeUndefined();
 
+			// The host acknowledges setFastMode before the service_tier_changed wire
+			// event reaches the attached session, so subscribe first and wait for the
+			// mirrored state instead of asserting on the RPC reply alone.
+			const tierChanged = new Promise<void>((resolve, reject) => {
+				const timer = setTimeout(() => {
+					unsubscribe();
+					reject(new Error("timed out waiting for service_tier_changed with fastMode=true"));
+				}, 10_000);
+				const unsubscribe = runtime.session.subscribe((event) => {
+					if (event.type !== "service_tier_changed" || !event.fastMode) return;
+					clearTimeout(timer);
+					unsubscribe();
+					resolve();
+				});
+			});
 			await observer.setFastMode(true);
+			await tierChanged;
 
 			expect(runtime.session.isFastModeActive()).toBe(true);
 			expect(runtime.session.serviceTier).toBe("priority");

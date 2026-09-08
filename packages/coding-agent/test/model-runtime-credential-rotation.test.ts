@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AssistantMessage, AssistantMessageEvent } from "@earendil-works/pi-ai";
+import type { AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { rendezvousOrder } from "@earendil-works/pi-ai/auth/pool/select";
 import type { PooledCredential } from "@earendil-works/pi-ai/auth/pool/slots";
@@ -88,6 +88,26 @@ async function collect(source: AsyncGenerator<AssistantMessageEvent>): Promise<A
 	return seen;
 }
 
+/**
+ * Consumes a runtime event stream to its terminal event and then CLOSES it.
+ *
+ * The stream reports completion at the terminal event, but the credential
+ * rotation generator behind `ModelRuntime.stream` still has to run its final
+ * pool-state persistence write after yielding that event. Removing the
+ * runtime's temp dir while that write is in flight fails with ENOTEMPTY
+ * (issue #1457), so teardown must not race it: breaking out of the loop
+ * invokes the lazy stream's cancellation handler, which awaits the inner
+ * generator's completion before returning.
+ */
+async function collectClosedRuntimeEvents(stream: AssistantMessageEventStream): Promise<AssistantMessageEvent[]> {
+	const events: AssistantMessageEvent[] = [];
+	for await (const event of stream) {
+		events.push(event);
+		if (event.type === "done" || event.type === "error") break;
+	}
+	return events;
+}
+
 describe("credential rotation over a pooled provider", () => {
 	test("runtime admission runs an expired stored probe once", async () => {
 		const faux = fauxProvider();
@@ -99,7 +119,7 @@ describe("credential rotation over a pooled provider", () => {
 			agentDir: dir,
 			allowModelNetwork: false,
 		});
-		runtime.registerNativeProvider(faux.provider);
+		await runtime.registerNativeProvider(faux.provider);
 		await runtime.refresh({ allowNetwork: false, providers: ["faux"] });
 		const pool = (await (runtime as any).loadCredentialPool()).repository as CredentialSlotRepository;
 		await pool.mutateSlotState("faux", "stored", "default", () => ({
@@ -111,13 +131,9 @@ describe("credential rotation over a pooled provider", () => {
 			blockReason: "rate_limit",
 		}));
 		faux.setResponses([fauxAssistantMessage("probe")]);
-		const events: AssistantMessageEvent[] = [];
-		for await (const event of runtime.stream(
-			faux.getModel(),
-			{ messages: [], tools: [] },
-			{ sessionId: "runtime-probe" },
-		))
-			events.push(event);
+		const events = await collectClosedRuntimeEvents(
+			runtime.stream(faux.getModel(), { messages: [], tools: [] }, { sessionId: "runtime-probe" }),
+		);
 		expect(events.some((event) => event.type === "done")).toBe(true);
 		expect(faux.getCallLog()).toHaveLength(1);
 	});
@@ -139,11 +155,10 @@ describe("credential rotation over a pooled provider", () => {
 			agentDir: dir,
 			allowModelNetwork: false,
 		});
-		runtime.registerNativeProvider(faux.provider);
+		await runtime.registerNativeProvider(faux.provider);
 		await runtime.refresh({ allowNetwork: false, providers: ["policy-only"] });
 		faux.setResponses([fauxAssistantMessage("policy-ok")]);
-		const events: AssistantMessageEvent[] = [];
-		for await (const event of runtime.stream(faux.getModel(), { messages: [], tools: [] })) events.push(event);
+		const events = await collectClosedRuntimeEvents(runtime.stream(faux.getModel(), { messages: [], tools: [] }));
 		expect(events.some((event) => event.type === "done")).toBe(true);
 		expect(faux.getCallLog()).toHaveLength(1);
 		rmSync(dir, { recursive: true, force: true });
@@ -162,7 +177,7 @@ describe("credential rotation over a pooled provider", () => {
 			agentDir: configDir,
 			allowModelNetwork: false,
 		});
-		runtime.registerNativeProvider(faux.provider);
+		await runtime.registerNativeProvider(faux.provider);
 		await runtime.refresh({ allowNetwork: false, providers: ["anthropic"] });
 		faux.setResponses([
 			() => {
@@ -170,15 +185,15 @@ describe("credential rotation over a pooled provider", () => {
 			},
 			fauxAssistantMessage("combined-ok"),
 		]);
-		const events: AssistantMessageEvent[] = [];
-		for await (const event of runtime.stream(
-			faux.getModel(),
-			{ messages: [], tools: [] },
-			{
-				env: { ANTHROPIC_API_KEY: "key-env" },
-			},
-		))
-			events.push(event);
+		const events = await collectClosedRuntimeEvents(
+			runtime.stream(
+				faux.getModel(),
+				{ messages: [], tools: [] },
+				{
+					env: { ANTHROPIC_API_KEY: "key-env" },
+				},
+			),
+		);
 		expect(events.some((event) => event.type === "done")).toBe(true);
 		expect(faux.getCallLog()).toHaveLength(2);
 		expect(

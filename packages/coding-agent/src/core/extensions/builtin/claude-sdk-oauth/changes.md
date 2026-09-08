@@ -1,5 +1,106 @@
 # claude-sdk-oauth
 
+## 2026-09-08 - `/claude-account add` relays login prompts through the shared account-command interaction
+
+### What changed
+
+- `account-command.ts`: `addAccount` builds its `AuthInteraction` with `createExtensionLoginInteraction` from `../oauth-login-interaction.ts` instead of a local relay that sent every prompt to `ctx.ui.input(prompt.message)`. Prompts now honour their type and placeholder and are dismissed when the provider aborts them; `auth_url` opens the browser in the TUI and `device_code` prints the user code. `ClaudeAccountCommandDeps` gains an optional `openBrowser` so tests can observe the launch. The local `authEventMessage` helper is gone.
+
+### Why
+
+- code-yeongyu/senpi#1485 fixed the same relay shape in `/gpt-account add`; the Claude command shared the placeholder, per-prompt-signal and browser gaps, so both commands now use one implementation.
+
+### Why an extension could not handle it
+
+- The command is registered by the builtin provider extension and drives `modelRuntime.login` directly; no user extension can interpose on that relay.
+
+### Expected merge conflict zones
+
+- LOW: `account-command.ts` import block, `ClaudeAccountCommandDeps`, and `addAccount`. Fork-only file.
+
+## 2026-09-07 - Restart bindings survive ledger entries appended after the committed assistant
+
+### What changed
+
+- `session-commit-boundary.ts`: `assistantContentHash` fingerprints only the semantic payload of each block - `text`, `thinking` (text and signature), and `toolCall` `{id, name, arguments}` - plus role/api/provider/model. Timing stamps, streaming indices, partial JSON, and any other transport metadata no longer participate; an unknown block shape is still hashed whole (fail-closed).
+- `session-binding.ts`: `bindingFromStoredBranch` no longer requires the committed assistant to sit immediately after the marker, and no longer checks the suffix against a hard-coded allowlist of custom types. The committed assistant is the first `message` entry after the marker; every entry the session-manager never projects into the LLM context (`custom` of any type, `label`, `session_info`, `thinking_level_change`, `model_change`, `configuration_update`, plus the goal-continuation `custom_message`) is admitted before and after it. Entries the model can see - `message`, any other `custom_message`, `compaction`, `branch_summary` - still fail closed.
+
+### Why
+
+- oh-my-openagent#7925 (`assistant_rewritten` cascade): the commit boundary compared a hash taken at the last `message_update` with the `message_end` message. Both carry the same answer, but the stream pipeline keeps stamping metadata around it after the last update (senpi#691 fixed one such field, thinking timing, by denylisting it). Every new volatile field re-opens the same hole: a plain turn commits as `rewritten`, the next turn forks or flattens, and after a flatten there is no earlier assistant boundary so every following turn flattens again with the whole conversation. Allowlisting the semantic payload closes the class instead of the instance; an extension that actually rewrites text, thinking, or tool arguments is still detected.
+- oh-my-openagent#7925: every `omo --session <id>` resume cold-seeded with `registry_miss` and the sidecar vanished. The co-resident memory extension appends `custom` ledger records after each turn and one more on every `session_start`, none of which were in the allowlist, so the next restart deleted a valid sidecar. The allowlist had already been patched twice for the same defect class (stop hooks, rule scans, goal warm-ups); the correct invariant is "never reaches the model", which the entry type decides, not the writer.
+
+### Why an extension could not handle it
+
+- The sidecar validation is private to this builtin's restart path; no extension hook observes it.
+
+### Expected merge conflict zones
+
+- MEDIUM: `session-binding.ts` around `bindingFromStoredBranch` and the retired `SAFE_BINDING_SUFFIX_TYPES` allowlist.
+- LOW: `session-commit-boundary.ts` around `assistantContentHash`.
+
+## 2026-09-07 - Emit one continuity observation per turn (discarded attempts stay silent)
+
+### What changed
+
+- `session-turn-attempt.ts`: `staged.emit()` moved out of the attempt generator's `finally` onto the retained-completion path. A discarded attempt (account failover unwinds the generator via `return()`) and an internally-failed attempt (throws to `catch`) now emit nothing; only an attempt consumed to completion emits, so a turn yields exactly one continuity observation. A turn where every attempt fails still yields the single terminal observation from `residentSessionMessages`.
+
+### Why
+
+- senpi#1432 follow-up: the observability contract (session-observability.ts head comment and the AGENTS.md invariant) promises exactly one observation per completed turn, but the `finally` emitted the discarded attempt's staged decision too. A two-account failover turn therefore logged two `claude_sdk_oauth_session_continuity` events (the discarded `delta` plus the retained `fork`), and a fully-failed turn logged its staged decision plus the terminal error - inflating the continuity counts the #1432 report was built on.
+
+### Why an extension could not handle it
+
+- The attempt lifecycle and the staged-observation emit are private to this builtin provider; no extension hook observes attempt retention.
+
+### Expected merge conflict zones
+
+- LOW: `session-turn-attempt.ts` around the generator `try/catch` tail (the removed `finally`).
+
+
+## 2026-09-07 - Reattach across account failover; retire the unwired failover decision
+
+### What changed
+
+- `session-continuity.ts`: `ContinuityDecisionInput.crossAccountResumeSupported` is a required boolean, filled by `session-stream.ts` from `auth.authLane !== "config-dir"`. `decideFromBinding` flattens account drift only with `cross_root_unsupported` on the config-dir lane; otherwise it falls through to the retry checkpoint (same-turn failover forks at the pre-turn boundary with reason `timeout_retry`) and the prefix checks (a matching prefix reattaches with reason `account_changed`). `model_changed` still flattens.
+- Removed `decideFailoverContinuity`, `FailoverContinuityInput`, `FailoverLane`, and `test/claude-sdk-oauth-failover-continuity.test.ts`. Tests were flipped in `claude-sdk-oauth-restart-binding-drift.test.ts`, `claude-sdk-oauth-restored-security.test.ts`, and `claude-sdk-oauth-continuity-retry-checkpoint.test.ts`; added regression coverage in `suite/regressions/1432-claude-sdk-oauth-failover-reattach.test.ts`.
+
+### Why
+
+- Issue #1432: on multi-account sessions a rate-limited attempt is discarded (`session-turn-attempt.ts` `discard()` closes the live entry), the next account's attempt takes the binding path, and `decideFromBinding` flattened on `account_changed` before the retry checkpoint could run, so every failover re-sent the whole conversation (observed 100 `flatten`/`account_changed` in one day, count up to 409). The session-stable HRW ranking re-selects the primary account when its 60 s block expires, so the cycle repeated. `decideFailoverContinuity` (3b8a5f828, 2026-08-01) described the intended behavior but was never called, and the "shared-root lanes reattach on failover" invariant documented below was never implemented.
+
+### Why an extension could not handle it
+
+- The decision table and the binding admission are private to this builtin.
+
+### Expected merge conflict zones
+
+- MEDIUM: `session-continuity.ts` (`ContinuityDecisionInput`, head of `decideFromBinding`, removed failover block).
+- LOW: `session-stream.ts` `decideNativeContinuity` call site; the flipped test files.
+
+## 2026-09-07 - Reattach restart bindings across prompt/toolset drift; date-line normalization survives trailing appends
+
+### What changed
+
+- `session-continuity.ts`: `identityDrift` now reports `system_prompt_changed` / `toolset_changed` instead of the bare `options_changed`. `decideFromBinding` flattens only on `account_changed` / `model_changed`; prompt/toolset drift falls through to the normal prefix checks and a matching prefix reattaches with the drift reason (divergence reasons still win). The live-entry path is unchanged structurally and simply surfaces the split reasons.
+- `session-sync.ts`: `GENERATED_DATE_LINE` no longer anchors the `Current working directory:` line to end-of-string, so the date/cwd pair is neutralized wherever it sits in the prompt.
+- Tests: `claude-sdk-oauth-restart-binding-drift.test.ts` (new) pins the restart contract and midnight stability with trailing appends; `claude-sdk-oauth-fingerprint.test.ts`, `claude-sdk-oauth-restored-security.test.ts`, `claude-sdk-oauth-continuity-decision.test.ts`, `claude-sdk-oauth-session-registry-wiring.test.ts` expectations moved from `options_changed` / `flatten` to the split reasons / `reattach`.
+
+### Why
+
+- oh-my-openagent#7884: a plain `omo --session <id>` resume after a restart printed `Session continuity lost - resent the full conversation (options_changed) - sent 485.5KB`. Two defects compounded: (1) a restart binding flattened on any fingerprint drift, while the live path reattaches on the same drift; (2) the date-line normalization required the cwd line to be the last line of the prompt, but a real prompt carries hundreds of lines of extension appends (`<Task_Management>`, bash timeout policy, terminal prompt, memory) after it, so `systemPromptHash` drifted at every UTC midnight and every restart-resume across a midnight or an engine/prompt upgrade re-sent the whole conversation.
+- A restart has no live query: the resume builds a fresh `query()` carrying the CURRENT options and hooks, so the 2026-09-0x note that a `HOST_TOOL_POLICY_FINGERPRINT` bump "cold-seeds once" on the first admission after upgrade is superseded - the bump now reattaches with `toolset_changed`, and resident sessions still re-fingerprint through the live path as before. Account/model drift keeps failing closed because those are lineage identity, not per-query options.
+- The split reasons answer the issue's request to see WHICH option group changed: `session.log` continuity events now carry `system_prompt_changed` or `toolset_changed`. `options_changed` stays in the sanitized vocabulary for historical log lines but is no longer emitted.
+
+### Why an extension could not handle it
+
+- The continuity decision table, the persisted binding admission, and the fingerprint digest are private to this builtin provider; no extension hook observes the restart binding or the hash inputs.
+
+### Expected merge conflict zones
+
+- MEDIUM: `session-continuity.ts` `identityDrift` and the head of `decideFromBinding` (drift gate + reattach reasons).
+- LOW: `session-sync.ts` `GENERATED_DATE_LINE` regex and its docblock; the four updated test files around `options_changed` expectations.
+
 ## 2026-09-06 - Preserve early terminal results during turn claim
 
 ### What changed

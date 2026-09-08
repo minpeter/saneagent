@@ -1,5 +1,23 @@
 # changes
 
+## 2026-09-07 - Add the memory Aha-moment tip
+
+### What changed
+
+- `packages/coding-agent/src/modes/interactive/tips/catalog/memory-tips.ts` gains `memory.aha-moment`, gated on the `memory` command like its siblings: memory can surface a stored fact on its own as an `Aha moment!` line when it would change the next step, and silence means nothing relevant was found.
+
+### Why
+
+- The memorian recall notice (omo-senpi `memorian-notice.ts`, oh-my-openagent #7906) had no tip in the rotation, so the one memory feature that acts without a command was the only one never explained.
+
+### Why an extension could not handle it
+
+- The tip catalog is a core interactive-mode registry with no extension registration surface.
+
+### Expected merge conflict zones
+
+- LOW: the tail of `MEMORY_TIPS` in `memory-tips.ts` and `test/suite/list-tips.test.ts`.
+
 ## 2026-09-06 - Preserve inline skill anchors in composed prompts
 
 ### What changed

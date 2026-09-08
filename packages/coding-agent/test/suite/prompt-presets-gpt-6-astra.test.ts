@@ -81,13 +81,13 @@ const EXPECTED_CONCERN: Record<Gpt6AstraRuleId, Gpt6AstraConcern> = {
 	"approval-last": "initiative",
 	steering: "initiative",
 	"no-unsolicited-caution": "initiative",
+	"memory-first": "initiative",
 	"instruction-precedence": "instruction-precedence",
 	"pause-transparency": "instruction-precedence",
 	"eval-first-routing": "tool-orchestration",
-	"parallel-batching": "tool-orchestration",
+	"evidence-comparison": "tool-orchestration",
+	"perceived-state-loop": "tool-orchestration",
 	"bun-runtime": "tool-orchestration",
-	"over-call-bias": "tool-orchestration",
-	"in-kernel-reduction": "tool-orchestration",
 	"stay-direct-exceptions": "tool-orchestration",
 	"lsp-symbol-routing": "symbol-routing",
 	delegation: "delegation",
@@ -113,13 +113,13 @@ const EXPECTED_SECTION: Record<Gpt6AstraRuleId, string> = {
 	"approval-last": "Initiative",
 	steering: "Initiative",
 	"no-unsolicited-caution": "Initiative",
+	"memory-first": "Initiative",
 	"instruction-precedence": "Instructions From Files",
 	"pause-transparency": "Instructions From Files",
 	"eval-first-routing": "Working the Task",
-	"parallel-batching": "Working the Task",
+	"evidence-comparison": "Working the Task",
+	"perceived-state-loop": "Working the Task",
 	"bun-runtime": "Working the Task",
-	"over-call-bias": "Working the Task",
-	"in-kernel-reduction": "Working the Task",
 	"stay-direct-exceptions": "Working the Task",
 	"lsp-symbol-routing": "Working the Task",
 	delegation: "Working the Task",
@@ -266,15 +266,9 @@ describe("GPT-6 Astra behavior contract", () => {
 		]);
 	});
 
-	it("renders the eval-cell and asynchronous-execution rules with bold emphasis and no other rule in bold", () => {
+	it("renders only the asynchronous-execution rules with bold emphasis", () => {
 		// given
-		const emphasized = new Set<Gpt6AstraRuleId>([
-			"eval-first-routing",
-			"parallel-batching",
-			"async-default",
-			"turn-end-is-wait",
-			"monitor-conditions",
-		]);
+		const emphasized = new Set<Gpt6AstraRuleId>(["async-default", "turn-end-is-wait", "monitor-conditions"]);
 
 		// then
 		for (const rule of GPT6_ASTRA_RULES) {
@@ -294,6 +288,15 @@ describe("GPT-6 Astra behavior contract", () => {
 			expect(section, `missing section for ${rule.id}`).toBeDefined();
 			expect(section, `${rule.id} lives in ${EXPECTED_SECTION[rule.id]}`).toContain(rule.directive);
 		}
+	});
+
+	it("keeps the fork routing line in the Intent Gate", () => {
+		// given: other suites and the README consume the "I read this as" sentinel, so
+		// scoping the line to a new request must not drop it from the rendered gate.
+		const sections = sectionsOf(buildPrompt("gpt-6-astra", "gpt-6-astra"));
+
+		// then
+		expect(sections.get("Intent Gate")).toContain("I read this as");
 	});
 
 	it("names the eval-cell form of the monitor subscription in Asynchronous Work", () => {

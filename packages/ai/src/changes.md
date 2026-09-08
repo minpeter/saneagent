@@ -1,3 +1,97 @@
+## 2026-09-08 - Recased gateway-namespaced tool references fold onto the request's tool names
+
+### What changed
+
+- `packages/ai/src/api/anthropic-tool-references.ts` (new): the Anthropic tool-reference integrity pass (`demoteUnavailableToolReferences` and its helpers) moved out of `packages/ai/src/api/anthropic-messages.ts` into its own module, mirroring `anthropic-tool-pairs.ts`. `packages/ai/src/api/anthropic-messages.ts` only imports the pass now (and keeps `httpStatusOfError`, which #1487 added beside it).
+- `resolveAvailableToolName` compares names with case and `_`/`-` separators folded away (`foldToolNameKey`) after the literal and namespace-stripped literal lookups fail. `collectAvailableToolNames` builds the folded index from the request's `tools` array once per request and drops any folded key that two request tools share, so the fold never guesses between candidates; such a reference stays unresolved and is dropped like before.
+- `packages/ai/test/anthropic-tool-reference-integrity.test.ts`: three cases pin the fold (recased native search references `mcp__a4e6__Memory` / `LspSymbols` / `XSearch` plus a hyphenated literal fold onto `memory` / `lsp_symbols` / `x_search` / the literal; a recased namespaced history `tool_use` is renamed; an ambiguous fold is dropped).
+
+### Why
+
+- Live 2026-09-08 (omo 5.0.0-0.beta.48 / senpi 2026.9.7-2, session 01a08016, claude-fable-5-1 through ccapi): a native tool search returned its references as `mcp__a4e6__Memory`, `mcp__a4e6__LspSymbols`, `mcp__a4e6__XSearch`, `mcp__a4e6__Eval` — namespaced AND recased. Every later Anthropic request failed with `Tool reference 'mcp__a4e6__Memory' not found in available tools` and the session fell back to another model each turn. The shipped engine predates #1480, so it replayed the block verbatim; on main, #1480's exact-suffix fold would have turned `Memory` into a dropped reference (no 400, but the discovery was lost and the search pair demoted) because `Memory !== memory`.
+
+### Why an extension could not handle it
+
+- Same seam as #1480: the repair runs against the final `tools` array right before the SDK call, on provider-native blocks the provider assembles from history.
+
+### Expected merge conflict zones
+
+- LOW: `anthropic-messages.ts` loses a fork-only block (the pass was fork-only since `5ecb30463`), so future upstream merges touch it less; the new module is fork-only.
+
+
+## 2026-09-08 - Deliver provider HTTP status on rejected Anthropic requests (senpi #1481)
+
+### What changed
+
+- `packages/ai/src/api/anthropic-messages.ts`: when the complete `retryProviderRequest` operation finally rejects, a numeric HTTP status carried by the SDK error (`APIError.status`) is delivered once through `options.onResponse` (`httpStatusOfError`) before the error is rethrown. Success-path delivery is unchanged; errors without a status (network, aborts) report nothing rather than a fabricated code.
+- `packages/ai/test/anthropic-on-response-error.test.ts`: a rejecting fake client proves status 400 and 500 reach `onResponse` exactly once and that a status-less error produces no callback.
+
+### Why
+
+- The SDK turns HTTP failures into rejections instead of a Response, so the success-only `onResponse` never fired for them. The native tool-search adapter's permanent 400 fallback (`noteResponseStatus`, senpi #1481) was unreachable on the live error path, and any other `after_provider_response` extension was blind to error statuses.
+
+### Why an extension could not handle it
+
+- The status exists only inside the provider's own request error object; an extension observing the payload hook or the assistant error message cannot recover the HTTP code.
+
+### Expected merge conflict zones
+
+- MEDIUM: the request construction block in `packages/ai/src/api/anthropic-messages.ts` (upstream has no error-path callback); LOW: the new test file (fork-only).
+## 2026-09-08 - Anthropic tool references resolve against the request's own tools (senpi native tool-search 400)
+
+### What changed
+
+- `packages/ai/src/api/anthropic-messages.ts`: `demoteUnavailableToolReferences` now decides availability from the final `tools` array alone and repairs every reference site. A `tool_reference` whose `tool_name` carries a gateway namespace (`mcp__<id>__<tool>`) is folded back to the request's own tool name when that tool is defined (`resolveAvailableToolName`); a reference that still does not resolve is dropped. Replayed native `tool_search_tool_result` blocks are repaired the same way (`rewriteToolReferenceItems`), and a search pair whose every reference stopped resolving is demoted to text together with its `server_tool_use`. A history `tool_use` under a gateway namespace is renamed to the request's tool name; a `tool_use` whose only justification was a dangling discovery is demoted like any other unavailable call. `collectToolReferenceNames` is gone: discovered names no longer stand in for missing definitions.
+- `packages/ai/test/anthropic-tool-reference-integrity.test.ts`: five cases pin the invariant (namespaced native reference folded to `memory`; mixed list keeps the resolvable names; emptied search pair demoted; namespaced history `tool_use` renamed; dangling discovery no longer keeps its `tool_use`).
+
+### Why
+
+- Live 2026-09-08 (senpi 4adba7afb, omo desktop, claude-fable-5-1): a native tool search returned `tool_reference` names as `mcp__925c__memory`, `mcp__925c__todo`, ... — a namespace neither senpi nor the request defined — and the block replayed verbatim on the next request, which Anthropic rejected with `Tool reference 'mcp__925c__memory' not found in available tools`. The turn hard-errored and fell back to a weaker model. The repair pass saw the names as dangling but only rewrote `tool_result` content, so native results fell through untouched, and a dangling discovery still exempted a later `tool_use` from demotion.
+
+### Why an extension could not handle it
+
+- The reference repair runs after every `before_provider_request` hook, immediately before the SDK call, against the final tools array; an extension cannot see that array or the replayed provider-native blocks the provider itself assembles from history.
+
+### Expected merge conflict zones
+
+- MEDIUM: the `demoteUnavailableToolReferences` block and its helpers in `packages/ai/src/api/anthropic-messages.ts` (upstream has no gateway-namespace handling); LOW: the integrity test file (fork-only).
+
+## 2026-09-08 - Simple stream options carry the requested service tier (code-yeongyu/oh-my-openagent#6795)
+
+### What changed
+
+- `packages/ai/src/types.ts`: `SimpleStreamOptions.serviceTier` (`ServiceTierPreference`: `"auto" | "flex" | "priority"`) names the processing tier a caller requests.
+- `packages/ai/src/api/openai-responses.ts`, `packages/ai/src/api/openai-codex-responses.ts`: `streamSimple` forwards that option into the provider options, so it reaches `service_tier` on the wire and the tier-aware usage pricing, exactly like a full `stream()` call. Azure is unchanged (it does not sell Priority processing).
+
+### Why
+
+- The simple path dropped `serviceTier` in `buildBaseOptions`, so the only way to send the field was to mutate the request payload from an extension hook. A session that loads no extensions (SDK embedders, oh-my-openagent's in-process delegated children) could therefore never run at the priority tier even when its model was a `-fast` catalog variant.
+
+### Why this lives in the fork
+
+- `streamSimple` is the provider-neutral entry every host goes through; the field has to be threaded there.
+
+### Expected merge conflict zones
+
+- LOW: `SimpleStreamOptions` in `types.ts`; the `streamSimple` option literals in both Responses adapters.
+
+## 2026-09-07 - Classify OpenAI context-window overflow and token rate limits (code-yeongyu/oh-my-openagent#7921)
+
+### What changed
+
+- `packages/ai/src/utils/overflow.ts`: widen the OpenAI overflow pattern so "exceeds the model's context window" and "exceeds this model's context window" match, and add NON_OVERFLOW exclusions for tokens-per-window quota wording, TPM/RPM, quota exceeded, retry-after, HTTP 429 prefixes, and overloaded providers so those stay on the rate-limit path (code-yeongyu/oh-my-openagent#7921).
+
+### Why
+
+- OpenAI's current overflow text does not contain "exceeds the context window" as a contiguous phrase, so compaction recovery missed real overflows. Generic overflow fallbacks also matched token-quota 429s ("too many tokens per minute", "exceeds the limit of N tokens per minute"), so the agent showed a context-overflow error instead of the provider rate-limit error.
+
+### Why an extension could not handle it
+
+- `isContextOverflow` is the shared pi-ai classifier that compaction and overflow recovery consult before any extension hook runs; only a core pattern change can correct both the miss and the false positive.
+
+### Expected merge conflict zones
+
+- LOW: `packages/ai/src/utils/overflow.ts` OVERFLOW_PATTERNS OpenAI entry and NON_OVERFLOW_PATTERNS.
 
 ## 2026-09-05 - Project Astra configuration updates at the Responses wire
 
@@ -408,6 +502,29 @@
 ### Expected merge conflict zones
 
 - LOW: `utils/retry.ts` provider timeout pattern.
+
+## 2026-09-09 - Anthropic OAuth callback listener: ephemeral port fallback and idle timeout
+
+### What changed
+
+- `auth/oauth/anthropic.ts`: the login now binds its callback listener through `auth/oauth/anthropic-callback-listener.ts` (new, fork-only). The listener still prefers `127.0.0.1:53692`, but when that port is already held (EADDRINUSE, EACCES, EPERM) it binds an ephemeral loopback port instead of dropping into manual mode; the auth URL `redirect_uri`, the manual-prompt placeholder, and the token-exchange `redirect_uri` all carry the port that was actually bound. Manual-only mode (registered `http://localhost:53692/callback` redirect, paste the redirect URL) is now reached only when neither the preferred nor an ephemeral port can be bound.
+- `auth/oauth/anthropic.ts`: a login that receives neither a browser callback nor a pasted redirect URL for 10 minutes rejects with a timeout error and closes its listener, instead of holding the port and the manual prompt open indefinitely.
+- `auth/oauth/anthropic-callback-listener.ts`: a callback whose `state` belongs to another login answers HTTP 400 with a page that says the login belongs to a different session or an earlier attempt and tells the user to paste the address-bar URL into the session that is waiting (or to restart the login), instead of the bare "State mismatch." page.
+- `auth/oauth/authorization-input.ts` and `auth/oauth/error-details.ts` (new, fork-only): `parseAuthorizationInput` and `formatErrorDetails` moved out of `anthropic.ts` unchanged.
+
+### Why
+
+- Two senpi/omo processes on one machine (a second TUI session, an RPC host whose login prompt was never answered, an abandoned `/login`) could not both log in: the second login hit EADDRINUSE, fell back to manual mode while still advertising `localhost:53692`, and the browser redirect landed on the first process's stale listener, which rendered "State mismatch." on every retry (omo Discord report, 2026-09-09). The OAuth client is registered for any localhost port on `/callback` - the Claude Code CLI itself binds a random port - so a fixed port was never required.
+- A pending login had no deadline, so one abandoned attempt kept the port for the life of the process.
+
+### Why an extension could not handle it
+
+- The callback listener, the redirect URI it advertises, and the token exchange are created and owned inside the provider OAuth implementation before any auth interaction event reaches an extension; an extension can neither pick the port nor change the redirect URI the exchange must match.
+
+### Expected merge conflict zones
+
+- MEDIUM: `src/auth/oauth/anthropic.ts` callback listener startup, auth URL construction, manual prompt, cleanup (listener code moved out of the file).
+- LOW: `test/anthropic-oauth.test.ts` callback listener coverage.
 
 ## 2026-09-02 - Anthropic OAuth callback bind fallback
 
@@ -3627,3 +3744,22 @@ Detection has to happen inside the Anthropic SSE loop while the stream is still 
 
 ### Expected merge conflict zones
 - MEDIUM: `api/anthropic-messages.ts` cache-control placement in `buildParams()` and the final checkpoint pass in `convertMessages()`.
+
+## 2026-09-08 - Handle Anthropic mid-output server fallback
+
+### What changed
+
+- `packages/ai/src/api/anthropic-messages.ts` handles Anthropic `fallback` content blocks through the existing receipt path regardless of whether they arrive before or after output starts.
+- When client-side abort is disabled, `packages/ai/src/api/anthropic-messages.ts` preserves the fallback boundary, records the serving model, and continues accumulating its output.
+
+### Why
+
+- Anthropic documents mid-output fallback blocks as a supported streaming response. The early error in `packages/ai/src/api/anthropic-messages.ts` prevented configured refusal fallback routing.
+
+### Why an extension could not handle it
+
+- `packages/ai/src/api/anthropic-messages.ts` owns the SSE boundary, stream cancellation, and serving-model attribution before extension hooks receive the completed message.
+
+### Expected merge conflict zones
+
+- `packages/ai/src/api/anthropic-messages.ts`: the `content_block_start` fallback receipt branch.

@@ -199,11 +199,11 @@ export class RetryFallbackController {
 		failure: { errorMessage?: string; retryAfterMs?: number },
 	): Promise<boolean> {
 		const current = this.deps.getCurrentSelector();
-		const candidate = this.nextCandidate(false);
+		const candidate = this.nextCandidate(false, true);
 		if (!current || !candidate) return false;
 		const currentBase = formatSelector(current.model);
 		if (reason === "transient" || reason === "hard-error" || reason === "billing") {
-				this.deps.cooldowns.note(currentBase, failure);
+			this.deps.cooldowns.note(currentBase, failure);
 			this.deps.logger.info("cooldown_noted", { selector: currentBase, errorMessage: failure.errorMessage });
 		}
 
@@ -231,6 +231,7 @@ export class RetryFallbackController {
 
 	private nextCandidate(
 		reserve = true,
+		logDecision = reserve,
 	): { chainKey: string; selector: FallbackSelector; model: Model<Api> } | undefined {
 		const settings = this.deps.getSettings();
 		const current = this.deps.getCurrentSelector();
@@ -241,7 +242,7 @@ export class RetryFallbackController {
 		const chainKey = resolveChainKey(current.model, current.thinkingLevel, chains) ?? this.state?.chainKey;
 		const entries = chainKey ? chains[chainKey] : undefined;
 		if (!chainKey || !entries) {
-			if (reserve) this.deps.logger.debug("no_chain", { selector: formatSelector(current.model) });
+			if (logDecision) this.deps.logger.debug("no_chain", { selector: formatSelector(current.model) });
 			return undefined;
 		}
 		for (const raw of candidatesAfter(entries, formatSelector(current.model, current.thinkingLevel))) {
@@ -276,7 +277,7 @@ export class RetryFallbackController {
 			return { chainKey, selector, model };
 		}
 		this.lastExhaustedChainKey = chainKey;
-		if (reserve) this.deps.logger.info("candidates_exhausted", { chainKey });
+		if (logDecision) this.deps.logger.info("candidates_exhausted", { chainKey });
 		return undefined;
 	}
 
