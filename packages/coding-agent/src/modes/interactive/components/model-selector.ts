@@ -364,7 +364,9 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			if (!("model" in item)) {
 				// Reserve the favorite-marker column so this action aligns with model IDs.
 				const checkmark = this.configuredOwned ? theme.fg("success", " ✓") : "";
-				const line = isSelected ? theme.fg("accent", `→   ${item.label}`) + checkmark : `    ${item.label}${checkmark}`;
+				const line = isSelected
+					? theme.fg("accent", `→   ${item.label}`) + checkmark
+					: `    ${item.label}${checkmark}`;
 				this.listContainer.addChild(new Text(line, 0, 0));
 				continue;
 			}
@@ -378,7 +380,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 				const prefix = theme.fg("accent", "→ ");
 				const modelText = `${favoriteMarker}${theme.fg("accent", item.id)}`;
 				const providerBadge = theme.fg("muted", `[${item.provider}]`);
-			const checkmark = isCurrent && !this.configuredOwned ? theme.fg("success", " ✓") : "";
+				const checkmark = isCurrent && !this.configuredOwned ? theme.fg("success", " ✓") : "";
 				line = `${prefix}${modelText} ${providerBadge}${checkmark}`;
 			} else {
 				const modelText = `  ${favoriteMarker}${item.id}`;

@@ -8,11 +8,11 @@
 
 ### Why
 
-- `/model policy` could be transformed into `/model model` when argument input arrived before asynchronous autocomplete refreshed, causing model search instead of policy dispatch.
+- `packages/tui/src/components/editor.ts`: `/model configured` could be transformed into `/model model` when argument input arrived before asynchronous autocomplete refreshed, causing model search instead of configured dispatch. A stale `/mod` prefix must also preserve a later completed command plus argument.
 
 ### Why an extension could not handle it
 
-- Enter handling and autocomplete state are owned by the TUI editor before command dispatch.
+- `packages/tui/src/components/editor.ts`: Enter handling and autocomplete state are owned by the TUI editor before command dispatch.
 
 ### Expected merge conflict zones
 

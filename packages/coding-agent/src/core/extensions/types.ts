@@ -1876,10 +1876,11 @@ export interface ExtensionAPI {
 	// =========================================================================
 
 	/**
-	 * Set the model for the current session without changing the configured default for new sessions.
+	 * Set the current model and persisted default for new sessions.
 	 * Returns false if authentication is not configured for the model's provider.
+	 * Defaults to programmatic attribution; pass deliberate: true for a user selection.
 	 */
-	setModel(model: Model<any>): Promise<boolean>;
+	setModel(model: Model<any>, options?: ModelSwitchOptions): Promise<boolean>;
 
 	/** Get current thinking level. */
 	getThinkingLevel(): ThinkingLevel;
@@ -1893,8 +1894,9 @@ export interface ExtensionAPI {
 	/**
 	 * Set the model for this session only, leaving the user's persisted default
 	 * model untouched. Returns false if no API key is available.
+	 * Defaults to programmatic attribution; pass deliberate: true for a user selection.
 	 */
-	setSessionModel(model: Model<any>): Promise<boolean>;
+	setSessionModel(model: Model<any>, options?: ModelSwitchOptions): Promise<boolean>;
 
 	/** Set thinking level for this session only (clamped), leaving the persisted default untouched. */
 	setSessionThinkingLevel(level: ThinkingLevel): void;
@@ -2214,7 +2216,7 @@ export type RefreshToolsHandler = () => void;
 
 export type RegisterRemovedToolHintHandler = (name: string, hint: string) => void;
 
-export type SetModelHandler = (model: Model<any>) => Promise<boolean>;
+export type SetModelHandler = (model: Model<any>, options?: ModelSwitchOptions) => Promise<boolean>;
 
 export type GetThinkingLevelHandler = () => ThinkingLevel;
 

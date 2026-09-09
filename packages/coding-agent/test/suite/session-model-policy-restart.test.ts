@@ -40,7 +40,8 @@ describe("policy selection across session restart", () => {
 					(pi) => {
 						api = pi;
 						pi.on("session_start", async (_event, ctx) => {
-							if (!ctx.sessionSettings.setModelPolicy) throw new Error("Session configured model API is missing");
+							if (!ctx.sessionSettings.setModelPolicy)
+								throw new Error("Session configured model API is missing");
 							await ctx.sessionSettings.setModelPolicy({
 								models: [{ model: `faux/${primary}`, thinkingLevel: "high" }],
 							});

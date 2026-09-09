@@ -7,9 +7,13 @@ import { resolveModelCommandAction } from "../../src/core/model-command-action.t
  */
 describe("model command action", () => {
 	it("#given the policy term #when a policy is configured #then it routes to the return action", () => {
-		expect(resolveModelCommandAction("configured", { hasConfiguredModel: true })).toEqual({ kind: "follow-configured" });
+		expect(resolveModelCommandAction("configured", { hasConfiguredModel: true })).toEqual({
+			kind: "follow-configured",
+		});
 		// Case and surrounding whitespace are how people actually type it.
-		expect(resolveModelCommandAction("  Configured  ", { hasConfiguredModel: true })).toEqual({ kind: "follow-configured" });
+		expect(resolveModelCommandAction("  Configured  ", { hasConfiguredModel: true })).toEqual({
+			kind: "follow-configured",
+		});
 	});
 
 	it("#given the policy term #when no policy is configured #then it reports instead of searching", () => {

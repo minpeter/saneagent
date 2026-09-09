@@ -13,6 +13,7 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
@@ -162,7 +163,8 @@ import type {
 	CompactionRejectionCause,
 	LazyToolActivator,
 	ModelSelectSource,
-	SessionModelPolicy,	ModelSwitchOptions,
+	ModelSwitchOptions,
+	SessionModelPolicy,
 } from "./extensions/types.ts";
 import { normalizeToolExposure, RUNTIME_EXTENSION_PATH } from "./extensions/types.ts";
 import { shouldWarnHighReasoning } from "./high-reasoning-warning.ts";
@@ -181,7 +183,7 @@ import { expandPromptTemplateWithMetadata, type PromptTemplate } from "./prompt-
 import { createProviderTimeoutRetryPlan, runBoundedRetryContinuation } from "./provider-timeout-retry.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { isBillingErrorMessage } from "./retry-fallback/billing.ts";
-import { formatSelector } from "./retry-fallback/chains.ts";
+import { canonicalizeFallbackChains, formatSelector, parseFallbackSelector } from "./retry-fallback/chains.ts";
 import { RetryFallbackController } from "./retry-fallback/controller.ts";
 import { SelectorCooldowns } from "./retry-fallback/cooldown.ts";
 import {
@@ -626,6 +628,8 @@ export interface AgentSessionConfig {
 	sessionStartEvent?: SessionStartEvent;
 	/** Only SDK-resolved defaults of new sessions may be replaced by an extension model policy. */
 	modelPolicySelectionAllowed?: boolean;
+	/** Admit an implicit fresh-session default after extensions can supply configured selection. */
+	deferInitialModelAdmission?: boolean;
 	autoTitleSessions?: boolean;
 }
 
@@ -635,6 +639,17 @@ type SessionModelEntry = {
 	thinkingSelection?: ThinkingSelection;
 	serviceTier?: ServiceTier;
 };
+
+interface ModelTransition {
+	runner: ExtensionRunner;
+	rollback: () => void;
+	committed: boolean;
+	accepting: boolean;
+	events: AgentSessionEvent[];
+	extensionEvents: Parameters<ExtensionRunner["emit"]>[0][];
+	invalidateCompaction: boolean;
+	thinkingOverride?: { persist: boolean };
+}
 
 interface CompactionExecutionRequest {
 	controller: AbortController;
@@ -769,6 +784,14 @@ class MissingModelAccessError extends Error {
 		this.name = "MissingModelAccessError";
 	}
 }
+
+class StaleModelTransitionError extends Error {
+	constructor() {
+		super("stale model transition");
+		this.name = "StaleModelTransitionError";
+	}
+}
+
 export interface ExtensionBindings {
 	uiContext?: ExtensionUIContext;
 	mode?: ExtensionMode;
@@ -1183,7 +1206,10 @@ export class AgentSession {
 	private _modelPolicy: ReturnType<typeof resolveSessionModelPolicy> | undefined;
 	private _modelPolicyRevision = 0;
 	private _modelPolicySelectionAllowed: boolean;
+	private _initialModelAdmissionPending: boolean;
 	private _modelSelectSource: ModelSelectSource | undefined;
+	private _pendingModelTransition: ModelTransition | undefined;
+	private readonly _modelTransitionContext = new AsyncLocalStorage<ModelTransition>();
 
 	/** Current model provenance, including selections made before a UI subscribes. */
 	get modelSelectSource(): ModelSelectSource | undefined {
@@ -1221,6 +1247,7 @@ export class AgentSession {
 		this.sessionManager = config.sessionManager;
 		this.settingsManager = config.settingsManager;
 		this._modelPolicySelectionAllowed = config.modelPolicySelectionAllowed ?? false;
+		this._initialModelAdmissionPending = config.deferInitialModelAdmission ?? false;
 		this._unsubscribeSettingsSource = this.settingsManager.subscribeToSourceSelection((source) => {
 			this._emit({ type: "settings_source_selected", ...source });
 		});
@@ -1686,6 +1713,11 @@ export class AgentSession {
 	}
 
 	private _emit(event: AgentSessionEvent): void {
+		const transition = this._admittingModelTransition();
+		if (transition) {
+			transition.events.push(event);
+			return;
+		}
 		if (event.type === "model_changed") this._modelSelectSource = event.source;
 		this._logSessionEvent(event);
 		for (const l of this._eventListeners) {
@@ -1878,7 +1910,36 @@ export class AgentSession {
 		return previousModel?.api !== nextModel.api;
 	}
 
+	private _assertModelTransitionCurrent(transition: ModelTransition): void {
+		if (
+			this._pendingModelTransition !== transition ||
+			transition.runner !== this._extensionRunner ||
+			!transition.runner.isActive
+		) {
+			throw new StaleModelTransitionError();
+		}
+	}
+
+	private _cancelModelTransition(): void {
+		const pending = this._pendingModelTransition;
+		if (!pending) return;
+		this._pendingModelTransition = undefined;
+		pending.rollback();
+	}
+
+	private _admittingModelTransition(): ModelTransition | undefined {
+		const transition = this._modelTransitionContext.getStore();
+		if (!transition || transition.committed) return undefined;
+		this._assertModelTransitionCurrent(transition);
+		return transition;
+	}
+
 	private _invalidateCompactionForModelSelection(): void {
+		const transition = this._admittingModelTransition();
+		if (transition) {
+			transition.invalidateCompaction = true;
+			return;
+		}
 		this.abortCompaction();
 		this.abortBranchSummary();
 		this._delegatedCompactionKey = undefined;
@@ -2929,6 +2990,7 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	dispose(): void {
+		this._cancelModelTransition();
 		try {
 			this._probeBackScheduler.cancel("dispose");
 			this.abortRetry();
@@ -3035,6 +3097,7 @@ export class AgentSession {
 	 * the user's model selection, not by `/fast`.
 	 */
 	setSessionFastMode(enabled: boolean): void {
+		this._admittingModelTransition();
 		const previousFastMode = this.isFastModeActive();
 		const previousTier = this._currentServiceTier;
 		this._sessionFastMode = enabled;
@@ -3314,6 +3377,7 @@ export class AgentSession {
 	}
 
 	setActiveToolsByName(toolNames: string[]): void {
+		const transition = this._admittingModelTransition();
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
 		const policyArmed = this._isEvalOnlyPolicyArmed();
@@ -3350,7 +3414,9 @@ export class AgentSession {
 			// binding itself, not to a mid-session change. The session was already
 			// committed to the client, so cancelling or invalidating work it started
 			// against that session would be spurious.
-			if (this._extensionBindingPromptReadiness === undefined) {
+			if (transition) {
+				transition.invalidateCompaction = true;
+			} else if (this._extensionBindingPromptReadiness === undefined) {
 				this.abortCompaction();
 				this._incrementMessageRevision();
 			}
@@ -3891,6 +3957,7 @@ export class AgentSession {
 				throw new Error(formatNoModelSelectedMessage());
 			}
 
+			this._admitInitialModel();
 			const hasConfiguredAuth =
 				this._modelRuntime.hasConfiguredAuth(this.model.provider) ||
 				(await this._modelRuntime.checkAuth(this.model.provider)) !== undefined;
@@ -4668,28 +4735,34 @@ export class AgentSession {
 		nextModel: Model<any>,
 		previousModel: Model<any> | undefined,
 		source: ModelSelectSource,
+		transition: ModelTransition,
+		previousSystemPrompt: string,
 	): Promise<SystemPromptChangeEvent | undefined> {
-		this.syncPromptCacheSafeWaitEnv();
 		if (!this._modelSelectionChangesContext(previousModel, nextModel)) return undefined;
-		const result = await this._extensionRunner.emitModelSelect({
-			type: "model_select",
-			model: nextModel,
-			previousModel,
-			source,
-			systemPrompt: this.agent.state.systemPrompt,
-			systemPromptOptions: this._baseSystemPromptOptions,
-		});
+		const result = await transition.runner.emitModelSelect(
+			{
+				type: "model_select",
+				model: nextModel,
+				previousModel,
+				source,
+				systemPrompt: previousSystemPrompt,
+				systemPromptOptions: this._baseSystemPromptOptions,
+			},
+			() => this._assertModelTransitionCurrent(transition),
+		);
+		this._assertModelTransitionCurrent(transition);
 		if (result?.systemPrompt === undefined) {
 			return undefined;
 		}
 
-		const previousSystemPrompt = this.agent.state.systemPrompt;
 		const systemPrompt = result.systemPrompt ?? this._baseSystemPrompt;
+		// Even an unchanged explicit prompt overrides a tool-triggered base rebuild.
+		// This remains provisional: admission owns rollback and emits no notification yet.
+		this.agent.state.systemPrompt = systemPrompt;
 		if (previousSystemPrompt === systemPrompt) {
 			return undefined;
 		}
 
-		this.agent.state.systemPrompt = systemPrompt;
 		const event: SystemPromptChangeEvent = {
 			type: "system_prompt_change",
 			systemPrompt,
@@ -4701,8 +4774,6 @@ export class AgentSession {
 		if (result.systemPromptName) {
 			event.systemPromptName = result.systemPromptName;
 		}
-		await this._extensionRunner.emit(event);
-		this._emit(event);
 		return event;
 	}
 
@@ -4760,61 +4831,93 @@ export class AgentSession {
 	 * Set the model for this session without changing the global model defaults.
 	 * The selection is still persisted in this session's history.
 	 */
-	async setSessionModel(model: Model<Api>, options?: ModelSwitchOptions): Promise<SystemPromptChangeEvent | undefined> {
+	async setSessionModel(
+		model: Model<Api>,
+		options?: ModelSwitchOptions,
+	): Promise<SystemPromptChangeEvent | undefined> {
 		return this._setModel(model, false, options?.deliberate ?? true);
+	}
+
+	private _admitInitialModel(): void {
+		if (!this._initialModelAdmissionPending) return;
+		this.assertModelUsable(undefined, 0, { admission: "start" });
+		this._initialModelAdmissionPending = false;
 	}
 
 	getRetryFallbackSettings() {
 		const settings = this.settingsManager.getRetryFallbackSettings();
+		const modelFallback = settings.modelFallback && !this._noModelFallback;
 		const policy = this._modelPolicy;
-		if (!policy) return settings;
+		if (!policy) return { ...settings, modelFallback };
 		const keys = policy.models.map(({ model }) => `${model.provider}/${model.id}`);
 		// Layer the policy over the configured chains per key, never replacing the whole map: a MAIN
 		// policy must not delete the chain a user configured for an unrelated model, and a manual
 		// switch to a model outside the policy has to keep falling back on its own configured chain.
-		// An explicitly disabled modelFallback still wins over the policy's multi-model default.
+		// A thinking-qualified key resolves before a base key in the controller. Expand
+		// bare settings keys first, then overlay matching canonical keys without changing
+		// other providers or treating colons belonging to an exact model ID as tuning.
+		const overlayKeys = new Set(keys);
+		for (const key of Object.keys(canonicalizeFallbackChains(settings.chains, this._modelRegistry))) {
+			const selector = parseFallbackSelector(key, this._modelRegistry);
+			if (selector && keys.includes(`${selector.provider}/${selector.id}`)) overlayKeys.add(key);
+		}
 		return {
 			...settings,
-			modelFallback: settings.modelFallback && !this._noModelFallback && policy.models.length > 1,
-			chains: { ...settings.chains, ...Object.fromEntries(keys.map((key) => [key, [...policy.selectors]])) },
+			modelFallback,
+			chains: {
+				...settings.chains,
+				...Object.fromEntries([...overlayKeys].map((key) => [key, [...policy.selectors]])),
+			},
 		};
 	}
 
 	async setModelPolicy(policy: SessionModelPolicy | undefined): Promise<void> {
+		this._admittingModelTransition();
 		const resolved = policy === undefined ? undefined : resolveSessionModelPolicy(policy, this._modelRegistry);
+		this._cancelModelTransition();
 		this._modelPolicyRevision++;
-		if (JSON.stringify(resolved?.selectors) === JSON.stringify(this._modelPolicy?.selectors)) return;
-		const previous = this._modelPolicy;
-		this._modelPolicy = resolved;
-		try {
-			// A fallback window is not a reason to skip application: this call clears that window a few
-			// lines below, so skipping would strand the session on a fallback model nobody chose while
-			// the newly declared chain never takes effect.
-			if (resolved && this._modelPolicySelectionAllowed) {
-				const primary = resolved.models.find(({ model }) => this._modelRuntime.hasConfiguredAuth(model.provider));
-				if (!primary) throw new Error("No configured authentication for any model in the session policy");
-				await this._switchActiveModel(primary.model, {
-					persistDefault: false,
-					appendSessionEntry: true,
-					emitModelSelect: true,
-					modelSelectSource: "configured",
-					selectionIntent: "configured",
-					invalidateCompaction: true,
-					ephemeralThinkingLevel: primary.thinkingLevel,
-				});
+		const selectorsUnchanged = JSON.stringify(resolved?.selectors) === JSON.stringify(this._modelPolicy?.selectors);
+		const commitPolicy = () => {
+			this._modelPolicy = resolved;
+			if (!selectorsUnchanged) {
+				this._probeBackScheduler.cancel("manual-model-change");
+				this._retryFallback.clear();
 			}
-		} catch (error) {
-			this._modelPolicy = previous;
-			throw error;
+			this.agent.abortServerSideFallback =
+				this.settingsManager.getAbortServerSideFallback() && this._retryFallback.hasConfiguredChain();
+			if (!resolved && this._modelSelectSource === "configured" && this.model) {
+				// The model stays selected, but no longer has configured attribution.
+				this._emit({ type: "model_changed", model: this.model, thinkingLevel: this.thinkingLevel, source: "set" });
+			}
+		};
+		if (resolved && this._modelPolicySelectionAllowed) {
+			if (selectorsUnchanged) {
+				// Catalog rebinding is not selection. Keep the active fallback/programmatic
+				// model, tuning, provenance, retry window and every notification/history intact.
+				const current = this.model;
+				const refreshed = current && this._modelRuntime.getModel(current.provider, current.id);
+				if (refreshed && refreshed !== current) {
+					this.assertModelUsable(refreshed, this._getDownswitchLiveContextTokens(refreshed));
+					this.agent.state.model = refreshed;
+				}
+				commitPolicy();
+				return;
+			}
+			const primary = resolved.models.find(({ model }) => this._modelRuntime.hasConfiguredAuth(model.provider));
+			if (!primary) throw new Error("No configured authentication for any model in the session policy");
+			await this._switchActiveModel(primary.model, {
+				persistDefault: false,
+				appendSessionEntry: true,
+				emitModelSelect: true,
+				modelSelectSource: "configured",
+				selectionIntent: "configured",
+				invalidateCompaction: true,
+				ephemeralThinkingLevel: primary.thinkingLevel,
+				onCommit: commitPolicy,
+			});
+			return;
 		}
-		// An active fallback is an execution condition, not a user decision: the policy still owns the
-		// slot. Previously this disarmed selection permanently, so a config edit landing while a
-		// provider was being retried left the session on a fallback model nobody chose, with the
-		// configured chain unable to select again for the rest of the session.
-		this._probeBackScheduler.cancel("manual-model-change");
-		this._retryFallback.clear();
-		this.agent.abortServerSideFallback =
-			this.settingsManager.getAbortServerSideFallback() && this._retryFallback.hasConfiguredChain();
+		commitPolicy();
 	}
 
 	/** Whether a declared session model policy exists, so a UI can offer the return action. */
@@ -4842,13 +4945,6 @@ export class AgentSession {
 		const primary = policy.models.find(({ model }) => this._modelRuntime.hasConfiguredAuth(model.provider));
 		if (!primary) throw new Error("No configured authentication for any model in the session policy");
 
-		// Returning is a deliberate fresh selection, so abandon any fallback window the same way a
-		// manual change does; the user asked for the configured primary, not the retry state.
-		const hadActiveFallback = this._retryFallback.activeState !== undefined;
-		this._probeBackScheduler.cancel("manual-model-change");
-		this._retryFallback.clearForManualModelChange(primary.model);
-		if (hadActiveFallback && this._retryAbortController) this.abortRetry();
-
 		return await this._switchActiveModel(primary.model, {
 			persistDefault: false,
 			appendSessionEntry: true,
@@ -4857,6 +4953,7 @@ export class AgentSession {
 			selectionIntent: "configured",
 			invalidateCompaction: true,
 			ephemeralThinkingLevel: primary.thinkingLevel,
+			clearManualFallback: true,
 		});
 	}
 
@@ -4865,25 +4962,9 @@ export class AgentSession {
 		updateGlobalDefaults: boolean,
 		deliberate = true,
 	): Promise<SystemPromptChangeEvent | undefined> {
-		this.assertModelUsable(model, this._getDownswitchLiveContextTokens(model));
-		if (!(await this._modelRuntime.checkAuth(model.provider))) {
-			throw new Error(`No API key for ${model.provider}/${model.id}`);
-		}
-
-		// A manual model change abandons any active fallback window; if a fallback
-		// retry sleep is still pending, cancel it so no surprise continuation fires.
-		const hadActiveFallback = this._retryFallback.activeState !== undefined;
-		// Only a deliberate user pick takes the MAIN slot away from a declared policy. Builtin
-		// extensions drive this same path programmatically (a fast-mode toggle swaps to a variant and
-		// back, a recommendation switches on startup), and those must not transfer ownership: the user
-		// ends on a model they never chose while the configured chain goes inert for the session.
-		this._probeBackScheduler.cancel("manual-model-change");
-		this._retryFallback.clearForManualModelChange(model);
-		if (hadActiveFallback && this._retryAbortController) {
-			this.abortRetry();
-		}
-
 		return await this._switchActiveModel(model, {
+			checkAuth: true,
+			clearManualFallback: true,
 			persistDefault: updateGlobalDefaults,
 			appendSessionEntry: true,
 			emitModelSelect: true,
@@ -4924,81 +5005,172 @@ export class AgentSession {
 			selectionIntent?: "configured" | "manual" | "programmatic";
 			invalidateCompaction: boolean;
 			ephemeralThinkingLevel?: ThinkingLevel;
+			favorite?: SessionModelEntry;
+			onCommit?: () => void;
+			checkAuth?: boolean;
+			clearManualFallback?: boolean;
+			skippedEvents?: AgentSessionEvent[];
 		},
 	): Promise<SystemPromptChangeEvent | undefined> {
+		this._admittingModelTransition();
+		this._cancelModelTransition();
+		const runner = this._extensionRunner;
+		if (!runner.isActive) throw new StaleModelTransitionError();
 		const previousModel = this.model;
-		if (
-			opts.invalidateCompaction &&
-			(this._modelSelectionChangesContext(previousModel, model) ||
-				previousModel?.provider !== model.provider ||
-				previousModel?.id !== model.id)
-		) {
-			this._invalidateCompactionForModelSelection();
-		}
-		const thinking = this._getThinkingForModelSwitch(model, opts.ephemeralThinkingLevel);
-		const liveContextTokens = this._getDownswitchLiveContextTokens(model);
-		this.agent.state.model = model;
-		if (!(model.id === "gpt-6-astra" && (model.provider === "openai" || model.provider === "openai-codex"))) {
-			this.agent.state.reasoningBaseline = undefined;
-		}
-		const scopedMatch = this._scopedModels.find((sm) => modelsAreEqual(sm.model, model));
-		const previousTier = this._currentServiceTier;
-		const previousFastMode = this.isFastModeActive();
-		const previousThinkingLevel = this.agent.state.thinkingLevel;
-		const previousThinkingSelection = this.agent.state.thinkingSelection;
+		const previousSystemPrompt = this.systemPrompt;
+		const previousThinkingLevel = this.thinkingLevel;
+		const previousThinkingSelection = this.thinkingSelection;
 		const previousReasoningBaseline = this.agent.state.reasoningBaseline;
-		const previousAbortServerSideFallback = this.agent.abortServerSideFallback;
-		this.agent.abortServerSideFallback =
-			this.settingsManager.getAbortServerSideFallback() && this._retryFallback.hasConfiguredChain();
-		this._currentServiceTier = this._resolveServiceTier(model, scopedMatch?.serviceTier);
-
-		if (opts.ephemeralThinkingLevel !== undefined) {
-			this._applyEphemeralThinkingLevel(thinking.level);
-		} else {
-			this._setThinkingLevel(thinking.level, false, thinking.selection);
-		}
-
-		this._emitHighReasoningWarningIfNeeded();
-		const previousSystemPrompt = this.agent.state.systemPrompt;
-		try {
-			const systemPromptChange = opts.emitModelSelect
-				? await this._emitModelSelect(model, previousModel, opts.modelSelectSource)
-				: undefined;
-			this.assertModelUsable(model, liveContextTokens);
-			if (opts.appendSessionEntry) {
-				this.sessionManager.appendModelChange(
-					model.provider,
-					model.id,
-					opts.entryReason,
-					previousModel?.provider,
-					previousModel?.id,
-					opts.selectionIntent,
+		const previousTier = this._currentServiceTier;
+		const previousSessionFastMode = this._sessionFastMode;
+		const previousFastMode = this.isFastModeActive();
+		const previousBasePrompt = this._baseSystemPrompt;
+		const previousPromptOptions = this._baseSystemPromptOptions;
+		const previousTools = this.agent.state.tools;
+		const previousRequestedTools = this._requestedActiveToolNames;
+		const previousWithheld = new Set(this._withheldEvalOnlyToolNames);
+		const transition: ModelTransition = {
+			runner,
+			committed: false,
+			accepting: true,
+			events: [...(opts.skippedEvents ?? [])],
+			extensionEvents: [],
+			invalidateCompaction: opts.invalidateCompaction && this._modelSelectionChangesContext(previousModel, model),
+			rollback: () => {
+				if (previousModel) this.agent.state.model = previousModel;
+				else delete (this.agent.state as { model?: Model<Api> }).model;
+				this.agent.state.systemPrompt = previousSystemPrompt;
+				this.agent.state.thinkingLevel = previousThinkingLevel;
+				this.agent.state.thinkingSelection = previousThinkingSelection;
+				this.agent.state.reasoningBaseline = previousReasoningBaseline;
+				this._currentServiceTier = previousTier;
+				this._sessionFastMode = previousSessionFastMode;
+				this._baseSystemPrompt = previousBasePrompt;
+				this._baseSystemPromptOptions = previousPromptOptions;
+				this.agent.state.tools = previousTools;
+				this._requestedActiveToolNames = previousRequestedTools;
+				this._withheldEvalOnlyToolNames.clear();
+				for (const name of previousWithheld) this._withheldEvalOnlyToolNames.add(name);
+			},
+		};
+		this._pendingModelTransition = transition;
+		return this._modelTransitionContext.run(transition, async () => {
+			try {
+				const liveContextTokens = this._getDownswitchLiveContextTokens(model);
+				if (opts.checkAuth) {
+					this.assertModelUsable(model, liveContextTokens);
+					const authenticated = await this._modelRuntime.checkAuth(model.provider);
+					this._assertModelTransitionCurrent(transition);
+					if (!authenticated) throw new Error(`No API key for ${model.provider}/${model.id}`);
+				}
+				const thinking = this._getThinkingForModelSwitch(
+					model,
+					opts.favorite?.thinkingLevel ?? opts.ephemeralThinkingLevel,
+					opts.favorite?.thinkingSelection,
 				);
+				// Hooks retain their candidate context, but no history, settings, retry cleanup,
+				// notifications or revision changes are allowed until final admission succeeds.
+				this.agent.state.model = model;
+				this.agent.state.thinkingLevel = thinking.level;
+				this.agent.state.thinkingSelection =
+					opts.favorite || opts.ephemeralThinkingLevel === undefined ? thinking.selection : undefined;
+				const scopedMatch = this._scopedModels.find((entry) => modelsAreEqual(entry.model, model));
+				this._currentServiceTier = this._resolveServiceTier(
+					model,
+					opts.favorite?.serviceTier ?? scopedMatch?.serviceTier,
+				);
+				const systemPromptChange = opts.emitModelSelect
+					? await this._emitModelSelect(
+							model,
+							previousModel,
+							opts.modelSelectSource,
+							transition,
+							previousSystemPrompt,
+						)
+					: undefined;
+				this._assertModelTransitionCurrent(transition);
+				this.assertModelUsable(model, liveContextTokens);
+
+				// Commit synchronously. In particular, no await may split durable model intent
+				// from prompt/default/retry publication, including a cycle's outer caller.
+				transition.accepting = false;
+				const finalThinkingLevel = this.thinkingLevel;
+				const finalThinkingSelection = this.thinkingSelection;
+				this.agent.state.thinkingLevel = previousThinkingLevel;
+				this.agent.state.thinkingSelection = previousThinkingSelection;
+				if (!(model.id === "gpt-6-astra" && (model.provider === "openai" || model.provider === "openai-codex"))) {
+					this.agent.state.reasoningBaseline = undefined;
+				}
+				if (systemPromptChange) this.agent.state.systemPrompt = systemPromptChange.systemPrompt;
+				if (opts.clearManualFallback) {
+					const hadActiveFallback = this._retryFallback.activeState !== undefined;
+					this._probeBackScheduler.cancel("manual-model-change");
+					this._retryFallback.clearForManualModelChange(model);
+					if (hadActiveFallback && this._retryAbortController) this.abortRetry();
+				}
+				if (opts.appendSessionEntry && opts.favorite) {
+					this.sessionManager.appendModelChange(
+						model.provider,
+						model.id,
+						undefined,
+						undefined,
+						undefined,
+						opts.selectionIntent,
+					);
+				}
+				if (!opts.favorite && opts.ephemeralThinkingLevel !== undefined && !transition.thinkingOverride) {
+					this._applyEphemeralThinkingLevel(finalThinkingLevel);
+				} else {
+					this._setThinkingLevel(
+						finalThinkingLevel,
+						transition.thinkingOverride?.persist ?? false,
+						finalThinkingSelection,
+					);
+				}
+				if (opts.appendSessionEntry && !opts.favorite) {
+					this.sessionManager.appendModelChange(
+						model.provider,
+						model.id,
+						opts.entryReason,
+						previousModel?.provider,
+						previousModel?.id,
+						opts.selectionIntent,
+					);
+				}
+				if (opts.selectionIntent === "configured" || opts.selectionIntent === "manual") {
+					this._modelPolicySelectionAllowed = opts.selectionIntent === "configured";
+				}
+				if (opts.persistDefault) this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
+				opts.onCommit?.();
+				this.agent.abortServerSideFallback =
+					this.settingsManager.getAbortServerSideFallback() && this._retryFallback.hasConfiguredChain();
+				this._emitHighReasoningWarningIfNeeded();
+				if (systemPromptChange) transition.events.push(systemPromptChange);
+				this._emit({
+					type: "model_changed",
+					model,
+					thinkingLevel: this.thinkingLevel,
+					source: opts.modelSelectSource,
+				});
+				this._emitServiceTierChangeIfNeeded(previousTier, previousFastMode);
+				transition.committed = true;
+				this._pendingModelTransition = undefined;
+				if (transition.invalidateCompaction) this._invalidateCompactionForModelSelection();
+				this.syncPromptCacheSafeWaitEnv();
+				for (const event of transition.events) this._emit(event);
+				// Start every notification before yielding; there is no post-notification mutation
+				// for an older transition to perform if a handler selects another model or reloads.
+				await Promise.all([
+					...transition.extensionEvents.map((event) => runner.emit(event)),
+					...(systemPromptChange ? [runner.emit(systemPromptChange)] : []),
+				]);
+				if (runner !== this._extensionRunner || !runner.isActive) throw new StaleModelTransitionError();
+				return systemPromptChange;
+			} catch (error) {
+				if (this._pendingModelTransition === transition) this._cancelModelTransition();
+				throw error;
 			}
-			if (opts.selectionIntent === "configured" || opts.selectionIntent === "manual") {
-				this._modelPolicySelectionAllowed = opts.selectionIntent === "configured";
-			}
-			if (opts.persistDefault) this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
-			// Emit only after all admission hooks have accepted the candidate.
-			this._emit({
-				type: "model_changed",
-				model,
-				thinkingLevel: this.thinkingLevel,
-				source: opts.modelSelectSource,
-			});
-			this._emitServiceTierChangeIfNeeded(previousTier, previousFastMode);
-			return systemPromptChange;
-		} catch (error) {
-			if (previousModel) this.agent.state.model = previousModel;
-			else delete (this.agent.state as { model?: Model<Api> }).model;
-			this.agent.state.systemPrompt = previousSystemPrompt;
-			this.agent.state.thinkingLevel = previousThinkingLevel;
-			this.agent.state.thinkingSelection = previousThinkingSelection;
-			this.agent.state.reasoningBaseline = previousReasoningBaseline;
-			this.agent.abortServerSideFallback = previousAbortServerSideFallback;
-			this._currentServiceTier = previousTier;
-			throw error;
-		}
+		});
 	}
 
 	private _applyEphemeralThinkingLevel(level: ThinkingLevel): void {
@@ -5017,6 +5189,8 @@ export class AgentSession {
 	 * @returns The new model info, or undefined if only one model available
 	 */
 	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
+		this._admittingModelTransition();
+		this._cancelModelTransition();
 		const favoriteModels = this._getCurrentFavoriteModels();
 		if (favoriteModels.length > 0) {
 			return this._cycleFavoriteModel(direction, favoriteModels);
@@ -5045,13 +5219,14 @@ export class AgentSession {
 		const step = direction === "forward" ? 1 : -1;
 		let selectedIndex: number | undefined;
 		const skippedModels: Model<any>[] = [];
+		const skippedEvents: AgentSessionEvent[] = [];
 		for (let offset = 0; offset < favoriteCount; offset++) {
 			const candidate = favoriteModels[(nextIndex + step * offset + favoriteCount) % favoriteCount];
 			if (modelsAreEqual(candidate.model, currentModel)) continue;
 			const admission = this._modelChangeWouldExhaustContext(candidate.model);
 			if (admission) {
 				skippedModels.push(candidate.model);
-				this._emit({
+				skippedEvents.push({
 					type: "model_change_skipped",
 					model: candidate.model,
 					contextWindow: candidate.model.contextWindow,
@@ -5076,6 +5251,7 @@ export class AgentSession {
 			if (onlyAlternative) {
 				this.assertModelUsable(onlyAlternative.model, this._getDownswitchLiveContextTokens(onlyAlternative.model));
 			}
+			for (const event of skippedEvents) this._emit(event);
 			return {
 				model: currentModel,
 				thinkingLevel: this.thinkingLevel,
@@ -5084,67 +5260,31 @@ export class AgentSession {
 			};
 		}
 		const next = favoriteModels[selectedIndex];
+		let selectedThinkingLevel = this.thinkingLevel;
 		const liveContextTokens = this._getDownswitchLiveContextTokens(next.model);
 		this.assertModelUsable(next.model, liveContextTokens);
-		const invalidatesCompaction =
-			this._modelSelectionChangesContext(currentModel, next.model) ||
-			currentModel?.provider !== next.model.provider ||
-			currentModel?.id !== next.model.id;
-		if (invalidatesCompaction) {
-			this._invalidateCompactionForModelSelection();
-		}
-		this._probeBackScheduler.cancel("manual-model-change");
-		this._retryFallback.clearForManualModelChange(next.model);
-		this._modelPolicySelectionAllowed = false;
-		const thinking = this._getThinkingForModelSwitch(next.model, next.thinkingLevel, next.thinkingSelection);
-
-		this.agent.state.model = next.model;
-		this.sessionManager.appendModelChange(
-			next.model.provider,
-			next.model.id,
-			undefined,
-			undefined,
-			undefined,
-			"manual",
-		);
-		this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
-		const previousTier = this._currentServiceTier;
-		const previousFastMode = this.isFastModeActive();
-		this._currentServiceTier = this._resolveServiceTier(next.model, next.serviceTier);
-
-		// Apply thinking level and provenance from the favorite projection or remembered preference.
-		this._setThinkingLevel(thinking.level, false, thinking.selection);
-
-		// Post-switch, same contract as _switchActiveModel: the level in force AFTER the cycle.
-		this._emit({
-			type: "model_changed",
-			model: next.model,
-			thinkingLevel: this.thinkingLevel,
-			source: "cycle",
+		const systemPromptChange = await this._switchActiveModel(next.model, {
+			persistDefault: true,
+			appendSessionEntry: true,
+			emitModelSelect: true,
+			modelSelectSource: "cycle",
+			selectionIntent: "manual",
+			invalidateCompaction: true,
+			favorite: next,
+			clearManualFallback: true,
+			skippedEvents,
+			onCommit: () => {
+				selectedThinkingLevel = this.thinkingLevel;
+			},
 		});
-		this._emitServiceTierChangeIfNeeded(previousTier, previousFastMode);
-
-		const previousSystemPrompt = this.agent.state.systemPrompt;
-		try {
-			const systemPromptChange = await this._emitModelSelect(next.model, currentModel, "cycle");
-			this.assertModelUsable(next.model, liveContextTokens);
-
-			const cycleResult: ModelCycleResult = {
-				model: next.model,
-				thinkingLevel: this.thinkingLevel,
-				isScoped: true,
-				skippedModels,
-			};
-			if (systemPromptChange) {
-				cycleResult.systemPromptChange = systemPromptChange;
-			}
-			return cycleResult;
-		} catch (error) {
-			if (currentModel) this.agent.state.model = currentModel;
-			else delete (this.agent.state as { model?: Model<Api> }).model;
-			this.agent.state.systemPrompt = previousSystemPrompt;
-			throw error;
-		}
+		const cycleResult: ModelCycleResult = {
+			model: next.model,
+			thinkingLevel: selectedThinkingLevel,
+			isScoped: true,
+			skippedModels,
+		};
+		if (systemPromptChange) cycleResult.systemPromptChange = systemPromptChange;
+		return cycleResult;
 	}
 
 	// =========================================================================
@@ -5173,8 +5313,15 @@ export class AgentSession {
 		updateGlobalDefault: boolean,
 		selection: ThinkingSelection | undefined,
 	): void {
+		const transition = this._admittingModelTransition();
 		const availableLevels = this.getAvailableThinkingLevels();
 		const effectiveLevel = availableLevels.includes(level) ? level : this._clampThinkingLevel(level, availableLevels);
+		if (transition?.accepting) {
+			transition.thinkingOverride = { persist: updateGlobalDefault };
+			this.agent.state.thinkingLevel = effectiveLevel;
+			this.agent.state.thinkingSelection = selection ? { ...selection, level: effectiveLevel } : undefined;
+			return;
+		}
 
 		// Only persist if actually changing
 		const previousLevel = this.agent.state.thinkingLevel;
@@ -5215,11 +5362,9 @@ export class AgentSession {
 				this.settingsManager.setDefaultThinkingLevel(effectiveLevel);
 			}
 			this._emit({ type: "thinking_level_changed", level: effectiveLevel });
-			void this._extensionRunner.emit({
-				type: "thinking_level_select",
-				level: effectiveLevel,
-				previousLevel,
-			});
+			const event = { type: "thinking_level_select" as const, level: effectiveLevel, previousLevel };
+			if (transition) transition.extensionEvents.push(event);
+			else void this._extensionRunner.emit(event);
 			this._emitHighReasoningWarningIfNeeded();
 		}
 	}
@@ -7038,6 +7183,7 @@ export class AgentSession {
 			finishBindingWork();
 		}
 		await Promise.all(bindingPromptReadiness);
+		this._admitInitialModel();
 	}
 
 	private async extendResourcesFromExtensions(reason: "startup" | "reload"): Promise<void> {
@@ -7237,16 +7383,16 @@ export class AgentSession {
 				// startup recommendation switches for the user. Those are not deliberate picks, so they
 				// must not take the MAIN slot away from a declared policy. A user picking a model goes
 				// through the mode's own session.setModel call, which stays deliberate by default.
-				setModel: async (model) => {
+				setModel: async (model, options) => {
 					if (!this._modelRuntime.hasConfiguredAuth(model.provider)) return false;
-					await this.setModel(model, { deliberate: false });
+					await this.setModel(model, { deliberate: options?.deliberate ?? false });
 					return true;
 				},
 				getThinkingLevel: () => this.thinkingLevel,
 				setThinkingLevel: (level) => this.setThinkingLevel(level),
-				setSessionModel: async (model) => {
+				setSessionModel: async (model, options) => {
 					if (!this._modelRuntime.hasConfiguredAuth(model.provider)) return false;
-					await this.setSessionModel(model, { deliberate: false });
+					await this.setSessionModel(model, { deliberate: options?.deliberate ?? false });
 					return true;
 				},
 				setSessionThinkingLevel: (level) => this.setSessionThinkingLevel(level),
@@ -7654,6 +7800,7 @@ export class AgentSession {
 		if (veto.cancelled) {
 			return veto;
 		}
+		this._cancelModelTransition();
 		resetTimings("reload");
 		const modelPolicyRevision = this._modelPolicyRevision;
 		const oldExtensionRunner = this._extensionRunner;

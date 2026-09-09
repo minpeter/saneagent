@@ -6,7 +6,9 @@ import { TuiMainScreen } from "../src/tui-main-screen.ts";
 import { defaultEditorTheme } from "./test-themes.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
-it("submits /model configured literally while command-name autocomplete is still active", { timeout: 2000 }, async () => {
+it("submits /model configured literally while command-name autocomplete is still active", {
+	timeout: 2000,
+}, async () => {
 	const tui = new TuiMainScreen(new VirtualTerminal(80, 24));
 	const editor = new Editor(tui, defaultEditorTheme);
 	let rendered!: () => void;
@@ -36,11 +38,33 @@ it("submits /model configured literally while command-name autocomplete is still
 	assert.equal(editor.isShowingAutocomplete(), true);
 	// A terminal input chunk can include the argument and Enter before a new
 	// asynchronous autocomplete request replaces the command-name menu.
-	editor.handleInput(" policy");
+	editor.handleInput(" configured");
 	assert.equal(editor.isShowingAutocomplete(), true);
 	editor.handleInput("\r");
 	assert.equal(submitted, "/model configured");
 	assert.equal(completions, 0);
+});
+
+it("submits literal text when stale autocomplete prefixes /mod and later input completes the command", {
+	timeout: 2000,
+}, async () => {
+	const tui = new TuiMainScreen(new VirtualTerminal(80, 24));
+	const editor = new Editor(tui, defaultEditorTheme);
+	let rendered!: () => void;
+	const ready = new Promise<void>((resolve) => {
+		rendered = resolve;
+	});
+	tui.requestRender = () => rendered();
+	editor.setAutocompleteProvider(new CombinedAutocompleteProvider([{ name: "model" }], process.cwd()));
+	let actual: string | undefined;
+	editor.onSubmit = (text) => {
+		actual = text;
+	};
+	editor.handleInput("/mod");
+	await ready;
+	editor.handleInput("el configured");
+	editor.handleInput("\r");
+	assert.equal(actual, "/model configured");
 });
 
 for (const [input, value, submitted] of [

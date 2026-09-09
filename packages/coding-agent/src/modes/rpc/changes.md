@@ -1,5 +1,23 @@
 # changes
 
+## 2026-09-09 - Document configured model-event attribution
+
+### What changed
+
+- `packages/coding-agent/src/modes/rpc/rpc-types.ts`: model_changed source metadata includes `configured` and the unchanged-model `set` event that withdraws configured attribution; source remains open-ended for forward compatibility.
+
+### Why
+
+- `packages/coding-agent/src/modes/rpc/rpc-types.ts`: clients must not retain configured footer attribution after a declaration is removed, and metadata must match actual source values.
+
+### Why an extension could not handle it
+
+- `packages/coding-agent/src/modes/rpc/rpc-types.ts`: RPC event metadata is a host protocol contract.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/modes/rpc/rpc-types.ts`: `RpcModelChangedEvent.source` documentation.
+
 ## Watchdog reads the ownership token before it removes the scratch directory (2026-09-07)
 
 ### What changed

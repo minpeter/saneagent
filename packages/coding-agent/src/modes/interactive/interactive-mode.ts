@@ -94,6 +94,7 @@ import { buildHighReasoningWarning } from "../../core/high-reasoning-warning.ts"
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
+import { resolveModelCommandAction } from "../../core/model-command-action.ts";
 import {
 	defaultModelPerProvider,
 	findExactModelReferenceMatch,
@@ -103,7 +104,6 @@ import {
 	resolveModelScopeWithDiagnostics,
 	type ScopedModel,
 } from "../../core/model-resolver.ts";
-import { resolveModelCommandAction } from "../../core/model-command-action.ts";
 import { CredentialSynchronizationError } from "../../core/model-runtime.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";

@@ -59,7 +59,6 @@ describe("configured model ownership", () => {
 			resourceLoader: createTestResourceLoader({ extensionsResult }),
 		});
 		sessions.push(session);
-		const events: string[] = [];
 		await session.bindExtensions({ shutdownHandler() {} });
 		return {
 			h,
@@ -239,7 +238,7 @@ describe("configured model ownership", () => {
 
 	it("#given a policy with no authenticated model #when returning #then it rejects and keeps the model", async () => {
 		const h2 = await setup();
-		const { h, session, changePolicy } = h2;
+		const { h, session } = h2;
 		session.modelRuntime.registerProvider("unauthed", {
 			baseUrl: "http://127.0.0.1:1",
 			api: h.models[0].api,

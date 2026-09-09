@@ -871,6 +871,8 @@ export async function findInitialModel(options: {
 	cliModel?: string;
 	scopedModels: ScopedModel[];
 	isContinuing: boolean;
+	/** Settings-only narrowing keeps a saved default when it remains in scope. */
+	preferSavedDefault?: boolean;
 	defaultProvider?: string;
 	defaultModelId?: string;
 	defaultThinkingLevel?: ThinkingLevel;
@@ -905,12 +907,15 @@ export async function findInitialModel(options: {
 
 	// 2. Use first model from scoped models (skip if continuing/resuming)
 	if (scopedModels.length > 0 && !isContinuing) {
-		const scopedModel = scopedModels[0];
+		const scopedModel =
+			(options.preferSavedDefault
+				? scopedModels.find(({ model }) => model.provider === defaultProvider && model.id === defaultModelId)
+				: undefined) ?? scopedModels[0];
 		const perModel = options.modelThinkingLevels?.[`${scopedModel.model.provider}/${scopedModel.model.id}`];
 		return {
-			model: scopedModels[0].model,
-			thinkingLevel: perModel ?? scopedModels[0].thinkingLevel,
-			thinkingSelection: scopedModels[0].thinkingSelection,
+			model: scopedModel.model,
+			thinkingLevel: perModel ?? scopedModel.thinkingLevel,
+			thinkingSelection: scopedModel.thinkingSelection,
 			fallbackMessage: undefined,
 			provenance: "scoped",
 		};

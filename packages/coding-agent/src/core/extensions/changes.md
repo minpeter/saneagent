@@ -1,5 +1,35 @@
 # Core Extensions Changes
 
+## 2026-09-09 - Preserve deliberate model-switch intent in extension APIs
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/types.ts`: public `setModel` and `setSessionModel` accept optional `ModelSwitchOptions`, with `deliberate` defaulting to false.
+- `packages/coding-agent/src/core/extensions/loader.ts`: forwards deliberate model-switch options through the loader runtime.
+- `packages/coding-agent/src/core/extensions/runner.ts`: retained sessionSettings methods assert runner activity at invocation, and model_select admission asserts current transaction ownership before and after every handler. Runtime bindings preserve the typed model-switch option.
+- `packages/coding-agent/src/core/extensions/index.ts`: exports `ModelSwitchOptions`, `SessionModelPolicy`, and `ExtensionSessionSettings` for public consumers.
+
+### Why
+
+- `packages/coding-agent/src/core/extensions/types.ts`: extensions must distinguish deliberate user picks from programmatic changes without changing default-persistence semantics.
+- `packages/coding-agent/src/core/extensions/loader.ts`: dropping options at forwarding silently kept user picks programmatic.
+- `packages/coding-agent/src/core/extensions/runner.ts`: retired facades and older in-flight handlers must not publish into a newer generation or selection.
+- `packages/coding-agent/src/core/extensions/index.ts`: documented policy/options interfaces must be actual public exports.
+
+### Why an extension could not handle it
+
+- `packages/coding-agent/src/core/extensions/types.ts`: only the host can define the public extension contract.
+- `packages/coding-agent/src/core/extensions/loader.ts`: runtime forwarding is host-owned.
+- `packages/coding-agent/src/core/extensions/runner.ts`: runner generation and model admission ownership are beneath extension dispatch; arbitrary external extension side effects are not transactional.
+- `packages/coding-agent/src/core/extensions/index.ts`: extensions cannot publish types from the host package barrel.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/core/extensions/types.ts`: SetModelHandler and extension model methods.
+- `packages/coding-agent/src/core/extensions/loader.ts`: setModel/setSessionModel forwarding.
+- `packages/coding-agent/src/core/extensions/runner.ts`: context sessionSettings proxy, emitModelSelect assertions, runtime bindings.
+- `packages/coding-agent/src/core/extensions/index.ts`: type export list.
+
 ## 2026-09-06 - Optional non-persistent session model policy API
 
 `ExtensionSessionSettings.setModelPolicy` accepts an ordered nonempty `models`

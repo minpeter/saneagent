@@ -1355,7 +1355,7 @@ command, a retry fallback, or a session restore.
 
 `model` is a full [Model](#model) object. `thinkingLevel` is the level in force **after** the switch — each model
 remembers its own level, so this is that model's restored level (clamped to what it supports), not the level the
-previous model was using. `source` is one of `"set"`, `"cycle"`, `"restore"`, `"fallback"`, or `"fallback-revert"`.
+previous model was using. Current `source` values are `"set"`, `"cycle"`, `"configured"`, `"restore"`, `"fallback"`, and `"fallback-revert"`. Clients should tolerate future source values. `"configured"` means the session applied its configured model declaration. Removing that declaration emits `"set"` for the unchanged active model to clear configured attribution, without appending a model-history entry. An identical-selector catalog refresh rebinds the current model silently, including an active fallback.
 
 Clients that previously inferred the active model from `entry_appended` records can consume this instead.
 

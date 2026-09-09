@@ -1,8 +1,64 @@
+## 2026-09-09 - Complete configured-model selection and transactional admission
+
+### What changed
+
+- `packages/coding-agent/src/core/agent-session.ts`: model admission has an identity and runner generation; only its current owner can commit history, defaults, prompt/thinking/tier notifications, retry cleanup, and configured/manual ownership. Stale, rejected and reentrant admissions cannot roll back a newer selection. Identical configured selectors silently rebind the CURRENT catalog model, including active fallbacks, retaining tuning, provenance, retry state and all events/history. Fallback enablement is independent of declaration size/membership, respects explicit false and no-model-fallback, and configured overlays replace matching canonical thinking-qualified chains, including bare-family expansions, without deleting unrelated chains or changing other providers or literal-colon model IDs. Removing configured provenance emits an unchanged-model `set` event, without inventing user history. Extension model APIs forward deliberate intent (default false).
+- `packages/coding-agent/src/core/sdk.ts`: explicit fresh and empty-session launch selections persist manual intent; all effective initial thinking levels are clamped. Implicit fresh defaults are admitted after extension binding or before an unbound prompt, allowing a viable configured selection to replace an unusable default. Explicit/manual selections and restored transcript admission still reject immediately.
+- `packages/coding-agent/src/core/model-resolver.ts`: settings-only narrowing prefers the saved default if it remains enabled, while explicit scoped order still wins.
+- `packages/coding-agent/src/core/session-manager.ts`: explicit manual startup selections remain durable before any assistant message; transported mirrors can index an entry with `persist: false` without becoming a second disk writer.
+- `packages/coding-agent/src/core/model-command-action.ts`: `/model configured` resolves to the configured return action, or a no-declaration error, rather than fuzzy model search.
+- `packages/coding-agent/src/core/slash-commands.ts`: built-in `/model` metadata advertises `configured`, matching dispatch and autocomplete.
+
+### Why
+
+- `packages/coding-agent/src/core/agent-session.ts`: independent review probes exposed fallback enable/precedence bypasses, refresh jumping to primary, stale footer provenance, dropped deliberate options, and overlapping admission publication. Configured ownership is not a provider retry condition or a programmatic switch. Bare thinking-qualified settings keys previously expanded after the overlay and escaped to an excluded fallback; the overlay now uses the controller's canonical key semantics.
+- `packages/coding-agent/src/core/sdk.ts`: admission before session_start prevented the configured model from replacing a tiny implicit default; startup/restart must retain explicit user intent and effective capability clamps.
+- `packages/coding-agent/src/core/model-resolver.ts`: enabling a set of models is not an instruction to replace a saved default with its first member.
+- `packages/coding-agent/src/core/session-manager.ts`: empty manual sessions must preserve intent and shared-host clients must not duplicate authoritative JSONL records.
+- `packages/coding-agent/src/core/model-command-action.ts`: the return action is distinct from selecting an ordinary model named configured.
+- `packages/coding-agent/src/core/slash-commands.ts`: command discovery must use the actual accepted action token.
+
+### Why an extension could not handle it
+
+- `packages/coding-agent/src/core/agent-session.ts`: selection ownership, transactional commit, fallback configuration and notification provenance are core state below extension hooks.
+- `packages/coding-agent/src/core/sdk.ts`: default resolution and initial admission happen before extension binding.
+- `packages/coding-agent/src/core/model-resolver.ts`: SDK/CLI default ordering is resolved before session extensions run.
+- `packages/coding-agent/src/core/session-manager.ts`: JSONL persistence and mirror indexing are session-manager responsibilities.
+- `packages/coding-agent/src/core/model-command-action.ts`: the built-in command owns the configured action route.
+- `packages/coding-agent/src/core/slash-commands.ts`: built-in command metadata is not extension-owned.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/core/agent-session.ts`: `_switchActiveModel`, `setModelPolicy`, cycle admission, AsyncLocalStorage ownership, reload/dispose invalidation, provisional tool/thinking/fast-mode effects, `getRetryFallbackSettings`, `bindExtensions`, initial prompt admission and `_bindExtensionCore`.
+- `packages/coding-agent/src/core/sdk.ts`: session history/provenance restoration, initial thinking clamp, AgentSession construction and admission.
+- `packages/coding-agent/src/core/model-resolver.ts`: `findInitialModel` scoped/default ordering.
+- `packages/coding-agent/src/core/session-manager.ts`: model-intent persistence and `_appendEntry`/`appendEntry`.
+- `packages/coding-agent/src/core/model-command-action.ts`: configured token routing.
+- `packages/coding-agent/src/core/slash-commands.ts`: `/model` metadata.
+
+## 2026-09-09 - Keep shared-host mirror appends out of authoritative storage
+
+### What changed
+
+- `packages/coding-agent/src/core/session-manager.ts`: `appendEntry` accepts `persist: false` to update all in-memory entry indexes without writing a transported host entry to disk. Existing callers still persist by default.
+
+### Why
+
+- `packages/coding-agent/src/core/session-manager.ts`: manual startup selections now flush setup-only sessions. A client mirror opened on that same file must not persist the host's entry notifications a second time.
+
+### Why an extension could not handle it
+
+- `packages/coding-agent/src/core/session-manager.ts`: entry materialization, indexing, and persistence are owned by the session manager below the transport and extension APIs.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/core/session-manager.ts`: `_appendEntry` and `appendEntry`.
+
 ## 2026-09-08 - Restore policy selection intent across restart
 
 ### What changed
 
-- `packages/coding-agent/src/core/session-manager.ts`: model-change entries optionally carry exact `selectionIntent` (`policy`, `manual`, or `programmatic`) using the existing branch-local JSONL persistence.
+- `packages/coding-agent/src/core/session-manager.ts`: model-change entries optionally carry exact `selectionIntent` (`configured`, `manual`, or `programmatic`) using the existing branch-local JSONL persistence.
 - `packages/coding-agent/src/core/sdk.ts`: restore policy ownership from the latest owning selection, ignoring programmatic and transient fallback changes; explicit launch models record a manual selection. Histories without intent retain their existing override semantics.
 - `packages/coding-agent/src/core/agent-session.ts`: record policy/manual/programmatic intent only after a model switch is admitted; expose current model-event provenance as session state for late UI subscribers. Policy application restores configured tuning without changing ordinary settings defaults.
 
@@ -26,7 +82,7 @@
 `AgentSession.setModelPolicy` replaces the effective ordered fallback chain without
 changing settings. Only SDK-resolved defaults in new sessions may adopt the policy
 primary; explicit, restored and manual selections remain authoritative. Models
-outside the list have no policy fallback; one entry disables cross-model fallback.
+outside the list retain their own configured fallback chains; one entry has no distinct configured fallback candidate but does not disable the global fallback flag.
 Reload updates config-owned selection and removes policies no longer supplied by
 an extension. Unchanged policies preserve active fallback state. Exact IDs are
 validated before applying, with no default or provider-family expansion.

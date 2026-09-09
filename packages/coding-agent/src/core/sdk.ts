@@ -263,7 +263,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const lastModelSelection = sessionManager
 		.getBranch()
 		.findLast((entry) => entry.type === "model_change" && !entry.reason && entry.selectionIntent !== "programmatic");
-	const followsPolicy = lastModelSelection?.type === "model_change" && lastModelSelection.selectionIntent === "configured";
+	const followsPolicy =
+		lastModelSelection?.type === "model_change" && lastModelSelection.selectionIntent === "configured";
 	const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
 
 	let model = options.model;
@@ -304,6 +305,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	if (!model) {
 		const result = await findInitialModel({
 			scopedModels,
+			preferSavedDefault: options.scopedModels === undefined,
 			isContinuing: hasExistingSession,
 			defaultProvider: settingsManager.getDefaultProvider(),
 			defaultModelId: settingsManager.getDefaultModel(),
@@ -364,7 +366,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Clamp to model capabilities without inventing provenance for a defaulted level.
 	if (!model) {
 		thinkingLevel = "off";
-	} else if (!lastModelSelection) {
+	} else {
 		thinkingLevel = clampThinkingLevelToModel(thinkingLevel, model);
 	}
 	if (thinkingSelection) thinkingSelection = { ...thinkingSelection, level: thinkingLevel };
@@ -518,7 +520,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	} else {
 		// Save initial model and thinking level for new sessions so they can be restored on resume
 		if (model) {
-			sessionManager.appendModelChange(model.provider, model.id);
+			sessionManager.appendModelChange(
+				model.provider,
+				model.id,
+				undefined,
+				undefined,
+				undefined,
+				options.model ? "manual" : undefined,
+			);
 		}
 		sessionManager.appendThinkingLevelChange(thinkingLevel, thinkingSelection);
 	}
@@ -530,6 +539,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 		: options.sessionStartEvent;
 
+	const modelPolicySelectionAllowed =
+		!options.model &&
+		(!hasExistingSession || followsPolicy) &&
+		!hasPersistedManualSelection &&
+		initialModelProvenance !== "cli" &&
+		initialModelProvenance !== "scoped";
+	const deferInitialModelAdmission = modelPolicySelectionAllowed && !hasExistingSession;
 	const session = new AgentSession({
 		agent,
 		sessionManager,
@@ -543,12 +559,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		modelRuntime,
 		modelRegistry,
 		initialActiveToolNames,
-		modelPolicySelectionAllowed:
-			!options.model &&
-			(!hasExistingSession || followsPolicy) &&
-			!hasPersistedManualSelection &&
-			initialModelProvenance !== "cli" &&
-			initialModelProvenance !== "scoped",
+		modelPolicySelectionAllowed,
+		deferInitialModelAdmission,
 		defaultToolNames: sessionDefaultToolNames,
 		allowedToolNames,
 		excludedToolNames,
@@ -559,11 +571,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const liveContextTokens = hasExistingSession
 		? existingSession.messages.reduce((total, message) => total + estimateTokens(message), 0)
 		: 0;
-	session.assertModelUsable(
-		undefined,
-		liveContextTokens,
-		hasExistingSession ? { includeSpeculationLead: false, admission: "resume" } : { admission: "start" },
-	);
+	if (!deferInitialModelAdmission) {
+		session.assertModelUsable(
+			undefined,
+			liveContextTokens,
+			hasExistingSession ? { includeSpeculationLead: false, admission: "resume" } : { admission: "start" },
+		);
+	}
 	sessionRef.current = session;
 	const extensionsResult = resourceLoader.getExtensions();
 

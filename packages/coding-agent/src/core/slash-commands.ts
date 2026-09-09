@@ -20,8 +20,8 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "settings", description: "Open settings menu" },
 	{
 		name: "model",
-		description: "Select model (opens selector UI); 'policy' follows the configured chain",
-		argumentHint: "<provider/model>|policy",
+		description: "Select model (opens selector UI); 'configured' follows the configured chain",
+		argumentHint: "<provider/model>|configured",
 	},
 	{ name: "tree", description: "Navigate session tree (switch branches)" },
 	{ name: "thinking", description: "Set thinking level", argumentHint: "<level>" },

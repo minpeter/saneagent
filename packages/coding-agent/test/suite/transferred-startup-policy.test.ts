@@ -21,23 +21,54 @@ describe("transferred startup policy integration", () => {
 		let manager = SessionManager.inMemory(h.tempDir);
 		if (kind === "manual") {
 			const file = join(h.tempDir, "empty-manual.jsonl");
-			writeFileSync(file, [
-				{ type: "session", version: 3, id: "11111111-1111-4111-8111-111111111111", timestamp: "2026-09-08T00:00:00Z", cwd: h.tempDir },
-				{ type: "model_change", id: "m", parentId: null, timestamp: "2026-09-08T00:00:01Z", provider: "faux", modelId: "manual", selectionIntent: "manual" },
-			].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+			writeFileSync(
+				file,
+				[
+					{
+						type: "session",
+						version: 3,
+						id: "11111111-1111-4111-8111-111111111111",
+						timestamp: "2026-09-08T00:00:00Z",
+						cwd: h.tempDir,
+					},
+					{
+						type: "model_change",
+						id: "m",
+						parentId: null,
+						timestamp: "2026-09-08T00:00:01Z",
+						provider: "faux",
+						modelId: "manual",
+						selectionIntent: "manual",
+					},
+				]
+					.map((entry) => JSON.stringify(entry))
+					.join("\n") + "\n",
+			);
 			manager = SessionManager.open(file, h.tempDir);
 			expect(manager.buildSessionContext().messages).toHaveLength(0);
 		}
-		const extensionsResult = await createTestExtensionsResult([(pi) => {
-			pi.on("session_start", async (_event, ctx) => {
-				if (!ctx.sessionSettings.setModelPolicy) throw new Error("Missing policy API");
-				await ctx.sessionSettings.setModelPolicy({ models: [{ model: "faux/primary" }] });
-			});
-		}], h.tempDir);
+		const extensionsResult = await createTestExtensionsResult(
+			[
+				(pi) => {
+					pi.on("session_start", async (_event, ctx) => {
+						if (!ctx.sessionSettings.setModelPolicy) throw new Error("Missing policy API");
+						await ctx.sessionSettings.setModelPolicy({ models: [{ model: "faux/primary" }] });
+					});
+				},
+			],
+			h.tempDir,
+		);
 		const { session } = await createAgentSession({
-			cwd: h.tempDir, agentDir: h.tempDir, modelRuntime: h.session.modelRuntime,
-			sessionManager: manager, resourceLoader: createTestResourceLoader({ extensionsResult }),
-			settingsManager: SettingsManager.inMemory({ defaultProvider: "faux", defaultModel: "ordinary", ...(kind === "enabled" ? { enabledModels: ["faux/ordinary", "faux/primary"] } : {}) }),
+			cwd: h.tempDir,
+			agentDir: h.tempDir,
+			modelRuntime: h.session.modelRuntime,
+			sessionManager: manager,
+			resourceLoader: createTestResourceLoader({ extensionsResult }),
+			settingsManager: SettingsManager.inMemory({
+				defaultProvider: "faux",
+				defaultModel: "ordinary",
+				...(kind === "enabled" ? { enabledModels: ["faux/ordinary", "faux/primary"] } : {}),
+			}),
 			...(kind === "cli" ? { model: h.models[0], initialModelProvenance: "cli" as const } : {}),
 			...(kind === "scoped" ? { scopedModels: [{ model: h.models[0] }] } : {}),
 		});

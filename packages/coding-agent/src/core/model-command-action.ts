@@ -25,7 +25,9 @@ export function resolveModelCommandAction(
 	if (trimmed.toLowerCase() === MODEL_CONFIGURED_COMMAND_TERM) {
 		// Reporting beats silently searching for a model called "configured": the user asked for a
 		// feature that is not configured, and a model-not-found message would not explain that.
-		return context.hasConfiguredModel ? { kind: "follow-configured" } : { kind: "error", message: NO_MODEL_CONFIGURED_MESSAGE };
+		return context.hasConfiguredModel
+			? { kind: "follow-configured" }
+			: { kind: "error", message: NO_MODEL_CONFIGURED_MESSAGE };
 	}
 	return { kind: "search", searchTerm: trimmed };
 }

@@ -570,9 +570,9 @@ function createExtensionAPI(
 			return runtime.getCommands();
 		},
 
-		setModel(model) {
+		setModel(model, options) {
 			assertActive();
-			return runtime.setModel(model);
+			return runtime.setModel(model, options);
 		},
 
 		getThinkingLevel() {
@@ -585,9 +585,9 @@ function createExtensionAPI(
 			runtime.setThinkingLevel(level);
 		},
 
-		setSessionModel(model) {
+		setSessionModel(model, options) {
 			runtime.assertActive();
-			return runtime.setSessionModel(model);
+			return runtime.setSessionModel(model, options);
 		},
 
 		setSessionThinkingLevel(level) {

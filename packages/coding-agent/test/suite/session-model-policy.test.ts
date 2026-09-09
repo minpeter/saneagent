@@ -44,12 +44,12 @@ describe("session configured model", () => {
 		await settings.setModelPolicy(undefined);
 		expect(settings.getRetryFallbackSettings().chains).toEqual({ "faux/faux-1": ["faux/faux-3"] });
 	});
-	it("one model disables cross-model fallback and manual selection survives policy refresh", async () => {
+	it("one model keeps fallback enabled for unrelated manual models", async () => {
 		const h = await setup();
 		const settings = policySettings(h);
 		await settings.setModelPolicy({ models: [{ model: "faux/faux-1" }] });
-		expect(settings.getRetryFallbackSettings().modelFallback).toBe(false);
 		await h.session.setSessionModel(h.models[2]);
+		expect(settings.getRetryFallbackSettings().modelFallback).toBe(true);
 		await settings.setModelPolicy({ models: [{ model: "faux/faux-2" }] });
 		expect(h.session.model?.id).toBe("faux-3");
 		await settings.setModelPolicy({ models: [{ model: "faux/faux-1" }, { model: "faux/faux-2" }] });

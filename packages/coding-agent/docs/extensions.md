@@ -1936,9 +1936,11 @@ Typical `sourceInfo.source` values:
 - `sdk` for tools passed via `createAgentSession({ customTools })`
 - extension source metadata for tools registered by extensions
 
-### pi.setModel(model)
+### pi.setModel(model, options?) / pi.setSessionModel(model, options?)
 
-Set the model for the current session. The change is recorded in session history and restored when that session is resumed, but it does not change the configured `defaultProvider` or `defaultModel` used by new sessions. Returns `false` if authentication is not configured for the model's provider. See [models.md](models.md) for configuring custom models.
+Both methods record the accepted selection in session history and return `false` if authentication is not configured for the provider. `pi.setModel` also updates the persisted `defaultProvider` and `defaultModel`; `pi.setSessionModel` leaves those defaults untouched. See [models.md](models.md) for custom models.
+
+The optional public `ModelSwitchOptions` contains `deliberate?: boolean`. Extension calls default to `false`: programmatic switches retain configured model ownership and record `selectionIntent: "programmatic"`. Pass `{ deliberate: true }` for a user pick; it records `"manual"` intent and takes ownership away from the configured declaration. The direct SDK `AgentSession` methods instead default to deliberate selections.
 
 ```typescript
 const model = ctx.modelRegistry.find("anthropic", "claude-sonnet-4-5");
@@ -1949,6 +1951,14 @@ if (model) {
   }
 }
 ```
+
+### ctx.sessionSettings.setModelPolicy(policy) / followConfiguredModel()
+
+`SessionModelPolicy` and `ExtensionSessionSettings` are public type exports. The optional `setModelPolicy` method accepts `{ models: [{ model: "provider/exact-id", thinkingLevel?: "high" }, ...] }`, or `undefined` to remove the session-only declaration. Exact IDs and thinking levels are validated; no provider-family or default-chain expansion is performed. It never writes settings defaults.
+
+The first authenticated configured model can replace an implicit startup default, including one too small to admit the session. Explicit launch models and durable manual selections remain authoritative. A manual override can return through `/model configured`, the configured picker action, or `await ctx.sessionSettings.followConfiguredModel?.()`.
+
+Configured chains override matching base and thinking-qualified keys while preserving unrelated chains. The global fallback enable flag is independent of declaration size or membership; explicit `false` and `--no-model-fallback` still win. Identical selectors refresh the current catalog object without jumping an active fallback back to primary or emitting selection/history events. Removing the declaration clears configured footer attribution. Calls retained from a retired extension runner reject rather than mutate the replacement session generation.
 
 ### pi.getThinkingLevel() / pi.setThinkingLevel(level)
 

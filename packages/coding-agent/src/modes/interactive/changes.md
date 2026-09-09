@@ -1,13 +1,31 @@
+## 2026-09-09 - Mirror shared-host entries without a second disk writer
+
+### What changed
+
+- `packages/coding-agent/src/modes/interactive/interactive-host-runtime.ts`: entry notifications and authoritative refresh backfills append to the local mirror with persistence disabled. Shared-host clients suppress configured ownership/actions and reject both `setModelPolicy(policy)` and `setModelPolicy(undefined)` at the proxy boundary, leaving the local mirror and authoritative host unchanged.
+
+### Why
+
+- `packages/coding-agent/src/modes/interactive/interactive-host-runtime.ts`: the host already owns the shared JSONL. Re-persisting notifications duplicated setup-state and session_info entries after manual startup selection made the file durable before the first assistant response. The declaration setter previously fell through to the local mirror and silently accepted assignment/removal that the host never received.
+
+### Why an extension could not handle it
+
+- `packages/coding-agent/src/modes/interactive/interactive-host-runtime.ts`: the RPC mirror handles these events below extension dispatch; deduplicating records would conceal the extra writer rather than remove it.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/modes/interactive/interactive-host-runtime.ts`: `entry_appended` handling, `performRefresh` backfill, and configured API interception in the session proxy's `get` trap.
+
 ## 2026-09-08 - Recommend configured policy in model autocomplete
 
 ### What changed
 
-- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`: offer the `policy` action before matching model arguments only when a session policy is configured, including when the catalog is empty. Preserve existing model completions and argument submission semantics.
-- `packages/coding-agent/src/modes/interactive/components/model-selector.ts`: label the action `Use configured model policy`, retaining the description `Return model selection to the configured policy.` and existing ownership, checkmark, alignment, and favorite behavior.
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`: offer the `configured` action before matching model arguments only when a session policy is configured, including when the catalog is empty. Preserve existing model completions and argument submission semantics.
+- `packages/coding-agent/src/modes/interactive/components/model-selector.ts`: label the action `Use configured model`, retaining the description `Return model selection to the configured model order and fallback chain.` and existing ownership, checkmark, alignment, and favorite behavior.
 
 ### Why
 
-- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`: typing `/model policy` in the main editor previously recommended fuzzy model matches rather than the available policy action.
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`: typing `/model configured` in the main editor previously recommended fuzzy model matches rather than the available policy action.
 - `packages/coding-agent/src/modes/interactive/components/model-selector.ts`: the picker should identify the action consistently with the main editor recommendation.
 
 ### Why an extension could not handle it

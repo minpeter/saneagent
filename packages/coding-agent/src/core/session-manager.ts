@@ -1100,7 +1100,7 @@ export class SessionManager {
 		}
 	}
 
-	private _appendEntry(entry: SessionEntry): void {
+	private _appendEntry(entry: SessionEntry, persist = true): void {
 		const residentEntry = this.residentStore.externalize(entry);
 		this.fileEntries.push(residentEntry);
 		this.byId.set(residentEntry.id, residentEntry);
@@ -1108,15 +1108,16 @@ export class SessionManager {
 		this.leafId = residentEntry.id;
 		this._accumulateUsage(residentEntry);
 		this.mutationCount++;
-		this._persist(residentEntry);
+		if (persist) this._persist(residentEntry);
 	}
 
 	/**
 	 * Append an already-materialized entry without rewriting its identity or tree
 	 * fields. This is the transport seam for entries captured by another manager.
+	 * Client mirrors pass persist: false because the authoritative host owns disk writes.
 	 */
-	appendEntry(entry: SessionEntry): void {
-		this._appendEntry(entry);
+	appendEntry(entry: SessionEntry, options?: { persist?: boolean }): void {
+		this._appendEntry(entry, options?.persist ?? true);
 		const order = this.entryOrdersById.get(entry.id);
 		if (entry.type === "message" && order !== undefined) {
 			this.messageEntryPositions.set(entry.message, { entryId: entry.id, order });

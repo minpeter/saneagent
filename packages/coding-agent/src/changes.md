@@ -1,5 +1,23 @@
 # changes
 
+## 2026-09-09 - Export configured-model public contracts
+
+### What changed
+
+- `packages/coding-agent/src/index.ts`: exports `ModelSwitchOptions`, `SessionModelPolicy`, `ExtensionSessionSettings`, `ModelSelectSource`, `ModelSelectEvent`, `ModelSelectEventResult`, and `SystemPromptChangeEvent`.
+
+### Why
+
+- `packages/coding-agent/src/index.ts`: extensions and SDK consumers need the actual public policy/options and event types named in documentation, without importing internal source paths.
+
+### Why an extension could not handle it
+
+- `packages/coding-agent/src/index.ts`: the package entry point controls public type exports.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/index.ts`: extension type export list.
+
 ## 2026-09-07 - Add the memory Aha-moment tip
 
 ### What changed

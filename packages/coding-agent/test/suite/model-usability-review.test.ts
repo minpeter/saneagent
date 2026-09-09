@@ -90,6 +90,65 @@ describe("model usability review regressions", () => {
 		expect(harness.session.model?.id).toBe("current");
 	});
 
+	it("event-gated favorite cycle failure is fully atomic", async () => {
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const harness = await createHarness({
+			models: [
+				{ id: "current", contextWindow: 100_000, maxTokens: 4_000, reasoning: true },
+				{ id: "target", contextWindow: 99_000, maxTokens: 4_000 },
+			],
+			extensionFactories: [
+				(pi) => {
+					pi.on("model_select", async (event) => {
+						if (event.model.id === "target") {
+							await gate;
+							return { systemPrompt: "large ".repeat(100_000) };
+						}
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		await harness.session.bindExtensions({ shutdownHandler() {} });
+		await harness.session.setModelPolicy({ models: [{ model: "faux/current", thinkingLevel: "high" }] });
+		harness.session.setFavoriteModels([{ model: harness.models[0] }, { model: harness.models[1] }]);
+		harness.session.agent.state.reasoningBaseline = "low";
+		const snapshot = {
+			model: harness.session.model,
+			thinking: [harness.session.thinkingLevel, harness.session.agent.state.thinkingSelection],
+			reasoningBaseline: harness.session.agent.state.reasoningBaseline,
+			prompt: harness.session.systemPrompt,
+			serviceTier: harness.session.effectiveServiceTier,
+			fast: harness.session.isFastModeActive(),
+			owned: harness.session.isConfiguredModelOwned,
+			history: harness.session.sessionManager.getBranch(),
+			defaults: harness.settingsManager.getGlobalSettings(),
+			events: harness.events.filter(
+				(event) => event.type === "model_changed" || event.type === "model_change_skipped",
+			),
+		};
+		const cycle = harness.session.cycleModel();
+		release();
+		await expect(cycle).rejects.toBeInstanceOf(ModelUsabilityBudgetError);
+		expect({
+			model: harness.session.model,
+			thinking: [harness.session.thinkingLevel, harness.session.agent.state.thinkingSelection],
+			reasoningBaseline: harness.session.agent.state.reasoningBaseline,
+			prompt: harness.session.systemPrompt,
+			serviceTier: harness.session.effectiveServiceTier,
+			fast: harness.session.isFastModeActive(),
+			owned: harness.session.isConfiguredModelOwned,
+			history: harness.session.sessionManager.getBranch(),
+			defaults: harness.settingsManager.getGlobalSettings(),
+			events: harness.events.filter(
+				(event) => event.type === "model_changed" || event.type === "model_change_skipped",
+			),
+		}).toEqual(snapshot);
+	});
+
 	it("rolls back model and prompt after an unusable model-specific prompt", async () => {
 		const harness = await createHarness({
 			models: [

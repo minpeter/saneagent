@@ -709,7 +709,10 @@ export interface RpcModelChangedEvent {
 	type: "model_changed";
 	model: Model<any>;
 	thinkingLevel: ThinkingLevel;
-	/** Why the model changed: "set", "cycle", "restore", "fallback", or "fallback-revert". */
+	/** Attribution: "set", "cycle", "configured", "restore", "fallback", or "fallback-revert".
+	 * Removing configured attribution emits "set" with the unchanged model; no history entry is added.
+	 * Kept open-ended so clients tolerate future sources.
+	 */
 	source: string;
 	/** Selector provenance for `thinkingLevel` after the switch, when one was explicit. */
 	thinkingSelection?: ThinkingSelection;

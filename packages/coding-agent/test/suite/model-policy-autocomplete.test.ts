@@ -57,10 +57,13 @@ describe("main editor configured model autocomplete", () => {
 		},
 	);
 
-	it("offers policy with an empty model catalog", async () => {
-		const { suggestions } = createProvider(true, []);
-		expect((await suggestions("/model conf"))?.items.map((item) => item.value)).toEqual(["configured"]);
-	});
+	it.each(["/model con", "/model conf", "/model config", "/model configured"])(
+		"offers policy for %s",
+		async (line) => {
+			const { suggestions } = createProvider(true, []);
+			expect((await suggestions(line))?.items.map((item) => item.value)).toEqual(["configured"]);
+		},
+	);
 
 	it("omits the action without a configured policy, including an empty catalog", async () => {
 		const { suggestions } = createProvider(false);

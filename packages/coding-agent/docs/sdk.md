@@ -84,7 +84,10 @@ interface AgentSession {
   sessionId: string;
 
   // Model control
-  setModel(model: Model): Promise<void>;
+  setModel(model: Model, options?: ModelSwitchOptions): Promise<SystemPromptChangeEvent | undefined>;
+  setSessionModel(model: Model, options?: ModelSwitchOptions): Promise<SystemPromptChangeEvent | undefined>;
+  setModelPolicy(policy: SessionModelPolicy | undefined): Promise<void>;
+  followConfiguredModel(): Promise<SystemPromptChangeEvent | undefined>;
   setThinkingLevel(level: ThinkingLevel): void;
   cycleModel(): Promise<ModelCycleResult | undefined>;
   cycleThinkingLevel(): ThinkingLevel | undefined;
@@ -110,6 +113,10 @@ interface AgentSession {
   dispose(): void;
 }
 ```
+
+`ModelSwitchOptions`, `SessionModelPolicy`, `ModelSelectSource`, and `SystemPromptChangeEvent` are exported from the package root. Direct SDK model switches default to `{ deliberate: true }`; extension model switches default to false. `setModel` persists global model defaults while `setSessionModel` does not. Configured declarations are session-only, and `followConfiguredModel` returns ownership after a manual override.
+
+For implicit fresh-session defaults, initial usability admission occurs after `bindExtensions()` gives configured selection a chance to apply (or before the first unbound prompt). Explicit/manual selections and restored transcripts retain immediate admission. Always await extension binding before using an extension-configured session.
 
 Session replacement APIs such as new-session, resume, fork, and import live on `AgentSessionRuntime`, not on `AgentSession`.
 

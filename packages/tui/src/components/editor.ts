@@ -823,7 +823,7 @@ export class Editor implements Component, Focusable {
 			kb.matches(data, "tui.input.submit") &&
 			this.autocompletePrefix.startsWith("/") &&
 			!this.autocompletePrefix.includes(" ") &&
-			this.state.lines[this.state.cursorLine]?.startsWith(`${this.autocompletePrefix} `)
+			/^\/\S+\s/.test(this.state.lines[this.state.cursorLine] ?? "")
 		) {
 			this.cancelAutocomplete();
 		}
