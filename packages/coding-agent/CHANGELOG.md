@@ -10,6 +10,8 @@
 
 ### Fixed
 
+- Configured model selection now honors user settings at startup and resume: a startup pick derived from `--models` narrowing is no longer recorded as durable manual intent, so the configured declaration can still take over on later resumes, and a resumed session is no longer rejected on a restored model the configured declaration may still replace. A saved default that survives narrowing is preferred over the first narrowed model, an active fallback window no longer disarms configured selection, and a refreshed model re-clamps the effective thinking level to its capabilities. Model defaults and history are written only for genuinely explicit selections.
+
 ### Removed
 
 ## [2026.9.8] - 2026-09-08
