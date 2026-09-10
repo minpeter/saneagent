@@ -663,7 +663,8 @@ export function createRemoteSessionProxy(
 		}
 		if (wireEvent.type === "entry_appended") {
 			try {
-				sessionManager.appendEntry(wireEvent.entry);
+				// Host notifications update only the mirror; the host owns JSONL writes.
+				sessionManager.appendEntry(wireEvent.entry, { persist: false });
 				local.agent.state.messages = sessionManager.buildSessionContext().messages;
 			} catch {
 				// Non-fatal if the local snapshot cannot accept a concurrent entry.
@@ -764,7 +765,7 @@ export function createRemoteSessionProxy(
 					mirror.every((entry, index) => entry.id === authoritative[index]?.id);
 				if (!matches) {
 					const rebuilt = SessionManager.open(nextState.sessionFile, undefined, nextState.cwd);
-					for (const entry of authoritative) rebuilt.appendEntry(entry);
+					for (const entry of authoritative) rebuilt.appendEntry(entry, { persist: false });
 					// A notification that crossed this refresh refers to an entry the
 					// snapshot predates, so it is newer than the snapshot; dropping it
 					// would strand the entry until an unrelated refresh happened to
@@ -772,7 +773,7 @@ export function createRemoteSessionProxy(
 					const authoritativeIds = new Set(authoritative.map((entry) => entry.id));
 					for (const entry of mirror) {
 						if (!idsAtRefreshStart.has(entry.id) && !authoritativeIds.has(entry.id)) {
-							rebuilt.appendEntry(entry);
+							rebuilt.appendEntry(entry, { persist: false });
 						}
 					}
 					sessionManager = rebuilt;
@@ -798,8 +799,34 @@ export function createRemoteSessionProxy(
 		);
 		return next;
 	};
+	// The configured-model declaration is owned by the authoritative host. A shared-host
+	// client mirrors it and must never hold a divergent copy, so every route to it is
+	// closed here: reads report "absent", the actions reject, and a direct write or delete
+	// throws instead of falling through to the local target - `get` cannot observe those.
+	const CONFIGURED_MODEL_SURFACE: ReadonlySet<string | symbol> = new Set([
+		"hasConfiguredModel",
+		"isConfiguredModelOwned",
+		"followConfiguredModel",
+		"setModelPolicy",
+	]);
+	const configuredModelUnavailable = () =>
+		new Error("Configured model policy actions are unavailable in shared-host clients");
 	const session = new Proxy(local, {
+		set(target, property, value, receiver) {
+			if (CONFIGURED_MODEL_SURFACE.has(property)) throw configuredModelUnavailable();
+			return Reflect.set(target, property, value, receiver);
+		},
+		deleteProperty(target, property) {
+			if (CONFIGURED_MODEL_SURFACE.has(property)) throw configuredModelUnavailable();
+			return Reflect.deleteProperty(target, property);
+		},
 		get(target, property, receiver) {
+			if (property === "hasConfiguredModel" || property === "isConfiguredModelOwned") return false;
+			if (property === "followConfiguredModel" || property === "setModelPolicy") {
+				return async () => {
+					throw configuredModelUnavailable();
+				};
+			}
 			if (property === "prompt")
 				return async (message: string, options?: Parameters<AgentSession["prompt"]>[1]) => {
 					try {

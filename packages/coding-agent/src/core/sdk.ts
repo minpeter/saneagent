@@ -260,6 +260,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Check if session has existing data to restore
 	const existingSession = sessionManager.buildSessionContext();
 	const hasExistingSession = existingSession.messages.length > 0;
+	const lastModelSelection = sessionManager
+		.getBranch()
+		.findLast((entry) => entry.type === "model_change" && !entry.reason && entry.selectionIntent !== "programmatic");
+	const followsPolicy =
+		lastModelSelection?.type === "model_change" &&
+		(lastModelSelection.selectionIntent === "configured" || lastModelSelection.selectionIntent === "scoped");
 	const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
 
 	let model = options.model;
@@ -278,7 +284,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 
 	// If session has data, try to restore model from it
-	if (!model && hasExistingSession && existingSession.model) {
+	const hasPersistedManualSelection =
+		lastModelSelection?.type === "model_change" && lastModelSelection.selectionIntent === "manual";
+	if (!model && (hasExistingSession || hasPersistedManualSelection) && existingSession.model) {
 		const restored = resolveStoredModelReference(
 			existingSession.model.provider,
 			existingSession.model.modelId,
@@ -298,6 +306,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	if (!model) {
 		const result = await findInitialModel({
 			scopedModels,
+			// Narrowing selects which models are reachable, not which one starts. A saved
+			// default that survived the narrowing is still the user's pick, whether the
+			// scope came from settings or from an explicit SDK/CLI list.
+			preferSavedDefault: true,
 			isContinuing: hasExistingSession,
 			defaultProvider: settingsManager.getDefaultProvider(),
 			defaultModelId: settingsManager.getDefaultModel(),
@@ -306,7 +318,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			modelRuntime,
 		});
 		model = result.model;
-		initialModelProvenance = result.provenance;
+		// Settings narrowing is a default, not an explicit SDK/CLI scope selection.
+		initialModelProvenance =
+			result.provenance === "scoped" && options.scopedModels === undefined ? "settings" : result.provenance;
 		const selectedModel = model;
 		const scopedSelection = selectedModel
 			? scopedModels.find(
@@ -332,7 +346,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	// An exact-session thinking entry wins over settings unless a real legacy alias already
 	// selected a level. Old entries have no provenance, including Cursor's synthetic off.
-	if (thinkingLevel === undefined && hasExistingSession && hasThinkingEntry) {
+	if (thinkingLevel === undefined && (hasExistingSession || hasPersistedManualSelection) && hasThinkingEntry) {
 		thinkingLevel = existingSession.thinkingLevel as ThinkingLevel;
 		thinkingSelection = existingSession.thinkingSelection;
 	}
@@ -497,18 +511,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// from initialState; assign the separately computed provenance explicitly.
 	agent.state.thinkingSelection = thinkingSelection;
 
-	// Restore messages if session has existing data
-	if (hasExistingSession) {
+	// A scope-derived startup pick is a narrowing default, not a model the user chose:
+	// recording it as durable manual intent would disarm a configured declaration in every
+	// later resume of the session, long after the narrowing flag is gone.
+	const hasExplicitModelSelection = options.model !== undefined && initialModelProvenance !== "scoped";
+
+	if (hasExistingSession || hasPersistedManualSelection) {
 		agent.state.messages = existingSession.messages;
-		if (!hasThinkingEntry) {
-			sessionManager.appendThinkingLevelChange(thinkingLevel, thinkingSelection);
-		}
-	} else {
-		// Save initial model and thinking level for new sessions so they can be restored on resume
-		if (model) {
-			sessionManager.appendModelChange(model.provider, model.id);
-		}
-		sessionManager.appendThinkingLevelChange(thinkingLevel, thinkingSelection);
 	}
 
 	const sessionStartEvent = initialModelProvenance
@@ -518,6 +527,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 		: options.sessionStartEvent;
 
+	const modelPolicySelectionAllowed =
+		!options.model &&
+		(!hasExistingSession || followsPolicy) &&
+		!hasPersistedManualSelection &&
+		initialModelProvenance !== "cli" &&
+		initialModelProvenance !== "scoped";
+	// A session the declaration may still select for must not be rejected on the model the
+	// SDK resolved before extensions bind: the declaration gets to replace an unusable
+	// implicit default first, and whatever survives that is admitted at the first prompt.
+	const deferInitialModelAdmission = modelPolicySelectionAllowed
+		? hasExistingSession
+			? ("resume" as const)
+			: ("start" as const)
+		: undefined;
 	const session = new AgentSession({
 		agent,
 		sessionManager,
@@ -531,6 +554,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		modelRuntime,
 		modelRegistry,
 		initialActiveToolNames,
+		modelPolicySelectionAllowed,
+		...(deferInitialModelAdmission ? { deferInitialModelAdmission } : {}),
 		defaultToolNames: sessionDefaultToolNames,
 		allowedToolNames,
 		excludedToolNames,
@@ -541,11 +566,36 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const liveContextTokens = hasExistingSession
 		? existingSession.messages.reduce((total, message) => total + estimateTokens(message), 0)
 		: 0;
-	session.assertModelUsable(
-		undefined,
-		liveContextTokens,
-		hasExistingSession ? { includeSpeculationLead: false, admission: "resume" } : { admission: "start" },
-	);
+	if (deferInitialModelAdmission === undefined) {
+		session.assertModelUsable(
+			undefined,
+			liveContextTokens,
+			hasExistingSession ? { includeSpeculationLead: false, admission: "resume" } : { admission: "start" },
+		);
+	}
+
+	// Publish startup history only after eager admission succeeds. Manual selections flush
+	// immediately, so writing them earlier would make a rejected launch poison future resumes.
+	if (hasExistingSession || hasPersistedManualSelection) {
+		if (hasExplicitModelSelection && model) {
+			sessionManager.appendModelChange(model.provider, model.id, undefined, undefined, undefined, "manual");
+		}
+		if (!hasThinkingEntry) {
+			sessionManager.appendThinkingLevelChange(thinkingLevel, thinkingSelection);
+		}
+	} else {
+		if (model) {
+			sessionManager.appendModelChange(
+				model.provider,
+				model.id,
+				undefined,
+				undefined,
+				undefined,
+				hasExplicitModelSelection ? "manual" : initialModelProvenance === "scoped" ? "scoped" : undefined,
+			);
+		}
+		sessionManager.appendThinkingLevelChange(thinkingLevel, thinkingSelection);
+	}
 	sessionRef.current = session;
 	const extensionsResult = resourceLoader.getExtensions();
 

@@ -1,5 +1,47 @@
 # Core Extensions Changes
 
+## 2026-09-09 - Preserve deliberate model-switch intent in extension APIs
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/types.ts`: public `setModel` and `setSessionModel` accept optional `ModelSwitchOptions`, with `deliberate` defaulting to false.
+- `packages/coding-agent/src/core/extensions/loader.ts`: forwards deliberate model-switch options through the loader runtime.
+- `packages/coding-agent/src/core/extensions/runner.ts`: retained sessionSettings methods assert runner activity at invocation, and model_select admission asserts current transaction ownership before and after every handler. Runtime bindings preserve the typed model-switch option.
+- `packages/coding-agent/src/core/extensions/index.ts`: exports `ModelSwitchOptions`, `SessionModelPolicy`, and `ExtensionSessionSettings` for public consumers.
+
+### Why
+
+- `packages/coding-agent/src/core/extensions/types.ts`: extensions must distinguish deliberate user picks from programmatic changes without changing default-persistence semantics.
+- `packages/coding-agent/src/core/extensions/loader.ts`: dropping options at forwarding silently kept user picks programmatic.
+- `packages/coding-agent/src/core/extensions/runner.ts`: retired facades and older in-flight handlers must not publish into a newer generation or selection.
+- `packages/coding-agent/src/core/extensions/index.ts`: documented policy/options interfaces must be actual public exports.
+
+### Why an extension could not handle it
+
+- `packages/coding-agent/src/core/extensions/types.ts`: only the host can define the public extension contract.
+- `packages/coding-agent/src/core/extensions/loader.ts`: runtime forwarding is host-owned.
+- `packages/coding-agent/src/core/extensions/runner.ts`: runner generation and model admission ownership are beneath extension dispatch; arbitrary external extension side effects are not transactional.
+- `packages/coding-agent/src/core/extensions/index.ts`: extensions cannot publish types from the host package barrel.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/core/extensions/types.ts`: SetModelHandler and extension model methods.
+- `packages/coding-agent/src/core/extensions/loader.ts`: setModel/setSessionModel forwarding.
+- `packages/coding-agent/src/core/extensions/runner.ts`: context sessionSettings proxy, emitModelSelect assertions, runtime bindings.
+- `packages/coding-agent/src/core/extensions/index.ts`: type export list.
+
+## 2026-09-06 - Optional non-persistent session model policy API
+
+`ExtensionSessionSettings.setModelPolicy` accepts an ordered nonempty `models`
+list of exact provider/model IDs with optional `thinkingLevel`, or `undefined`
+to remove the override. AgentSession owns the policy; persistent fallback command
+setters retain their existing meaning. The optional API lets adapters detect old
+hosts instead of writing global settings as a compatibility workaround.
+
+This requires a core boundary because settings overrides belong to SettingsManager,
+not a session, and extension reload must withdraw removed policy owners. Expected
+merge-conflict zones: types.ts ExtensionSessionSettings and AgentSession's bound
+sessionSettings facade. No new event, loader shim, or persistent format is added.
 ## 2026-09-08 - Runner fallback for the goal backstop setting follows the 270s default
 
 ### What changed
@@ -36,7 +78,6 @@
 ### Expected merge conflict zones
 
 - LOW: `ExtensionContext`/`ExtensionContextActions` in `types.ts`, the context getters in `runner.ts`, the `model_select` handler in `builtin/service-tier.ts`.
-
 
 ## 2026-09-04 - UI prompt lifecycle events
 
@@ -2010,3 +2051,29 @@ If upstream modifies compaction event definitions in `types.ts`, preserve the ad
 Extension APIs now expose `pi.rpc.emit(name, data)`. It validates a non-empty name and publishes an
 opaque payload on the generation-owned extension bus; it does not write to a transport directly.
 Keep ordinary `pi.events` extension-local, and keep RPC delivery opt-in at the connection boundary.
+
+## MAIN configured model ownership and provenance (2026-09-08)
+
+`ExtensionSessionSettings` gains `followConfiguredModel()`: hand the MAIN slot back to the
+declared chain and apply it now. It rejects when no chain is configured or none of its models has
+configured auth, leaving the active model untouched. It exists because `setModelPolicy`
+early-returns on identical selectors, which is exactly the case when a user wants the chain they
+already declared.
+
+`ModelSelectSource` gains `configured`, emitted whenever a declared chain selects the model -
+startup, a changed chain, or a return. Both paths previously reused `restore`, which means
+session-history restore, so a consumer showing where the current model came from could not
+distinguish a configured chain from a resumed conversation. Consumers that switch on this union
+must handle the new value; `restore` now means history restore only.
+
+Ownership is also no longer transferred by machine events. `setModel`/`setSessionModel` take
+`{ deliberate }`, and the extension surface (`pi.setModel`, `pi.setSessionModel`) passes
+`deliberate: false` - a builtin swapping models programmatically no longer leaves the declared
+chain inert for the session. An active fallback window no longer disarms configured selection
+either.
+
+### Files modified
+
+- `types.ts`
+- `../agent-session.ts`
+- `../model-command-action.ts` (new)

@@ -1060,6 +1060,17 @@ export class ExtensionRunner {
 		const getEffectiveServiceTier = this.getEffectiveServiceTier;
 		const getScopedModels = this.getScopedModels;
 		let compactionSignal: AbortSignal | undefined;
+		const sessionSettings = new Proxy(runner.sessionSettingsFn, {
+			get(target, property, receiver) {
+				runner.assertActive();
+				const value = Reflect.get(target, property, receiver);
+				if (typeof value !== "function") return value;
+				return (...args: unknown[]) => {
+					runner.assertActive();
+					return value.apply(target, args);
+				};
+			},
+		});
 		return {
 			get ui() {
 				runner.assertActive();
@@ -1176,7 +1187,7 @@ export class ExtensionRunner {
 			},
 			get sessionSettings() {
 				runner.assertActive();
-				return runner.sessionSettingsFn;
+				return sessionSettings;
 			},
 			compact: (options) => {
 				runner.assertActive();
@@ -1304,7 +1315,11 @@ export class ExtensionRunner {
 		return result as RunnerEmitResult<TEvent>;
 	}
 
-	async emitModelSelect(event: ModelSelectEvent): Promise<ModelSelectEventResult | undefined> {
+	async emitModelSelect(
+		event: ModelSelectEvent,
+		assertCurrent: () => void = () => this.assertActive(),
+	): Promise<ModelSelectEventResult | undefined> {
+		assertCurrent();
 		let result: ModelSelectEventResult | undefined;
 
 		for (const ext of this.extensions) {
@@ -1312,12 +1327,14 @@ export class ExtensionRunner {
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
+				assertCurrent();
 				try {
 					// Re-read live prompt options per handler: an earlier handler that swaps
 					// the active toolset (gpt-apply-patch) must let later handlers
 					// (prompt-preset) rebuild from the post-swap tools in the same emission.
 					const liveEvent: ModelSelectEvent = { ...event, systemPromptOptions: this.getSystemPromptOptionsFn() };
 					const handlerResult = await handler(liveEvent, this.createContext(ext.path));
+					assertCurrent();
 					if (handlerResult) {
 						const nextResult = handlerResult as ModelSelectEventResult;
 						if (nextResult.systemPrompt !== undefined || nextResult.systemPromptName !== undefined) {
@@ -1336,6 +1353,9 @@ export class ExtensionRunner {
 						}
 					}
 				} catch (err) {
+					// Superseded admission is not an extension failure and must not continue
+					// dispatching older handlers against the newly selected model.
+					assertCurrent();
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitError({

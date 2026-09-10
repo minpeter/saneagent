@@ -84,7 +84,10 @@ interface AgentSession {
   sessionId: string;
 
   // Model control
-  setModel(model: Model): Promise<void>;
+  setModel(model: Model, options?: ModelSwitchOptions): Promise<SystemPromptChangeEvent | undefined>;
+  setSessionModel(model: Model, options?: ModelSwitchOptions): Promise<SystemPromptChangeEvent | undefined>;
+  setModelPolicy(policy: SessionModelPolicy | undefined): Promise<void>;
+  followConfiguredModel(): Promise<SystemPromptChangeEvent | undefined>;
   setThinkingLevel(level: ThinkingLevel): void;
   cycleModel(): Promise<ModelCycleResult | undefined>;
   cycleThinkingLevel(): ThinkingLevel | undefined;
@@ -110,6 +113,10 @@ interface AgentSession {
   dispose(): void;
 }
 ```
+
+`ModelSwitchOptions`, `SessionModelPolicy`, `ModelSelectSource`, and `SystemPromptChangeEvent` are exported from the package root. Direct SDK model switches default to `{ deliberate: true }`; extension model switches default to false. `setModel` persists global model defaults while `setSessionModel` does not. Configured declarations are session-only, and `followConfiguredModel` returns ownership after a manual override.
+
+For implicit fresh-session defaults, initial usability admission occurs after `bindExtensions()` gives configured selection a chance to apply (or before the first unbound prompt). Explicit/manual selections and restored transcripts retain immediate admission. Always await extension binding before using an extension-configured session.
 
 Session replacement APIs such as new-session, resume, fork, and import live on `AgentSessionRuntime`, not on `AgentSession`.
 
@@ -406,8 +413,9 @@ const { session } = await createAgentSession({
 
 If no model is provided:
 1. Tries to restore from session (if continuing)
-2. Uses default from settings
-3. Falls back to first available model
+2. Uses `scopedModels` (or `enabledModels` narrowing), preferring the saved settings default when it is still in scope, otherwise the first scoped model
+3. Uses default from settings
+4. Falls back to first available model
 
 Remote catalogs are persisted locally so later runtimes can restore them without a network request. The default file is `~/.pi/agent/models-store.json`; set `modelsStorePath` to choose another location, or inject `modelsStore` to control persistence. Network refreshes are throttled to once per provider every four hours unless forced. To force an immediate refresh, call `await modelRuntime.refresh({ allowNetwork: true, force: true, signal })`. Setting `PI_OFFLINE` disables model network access.
 

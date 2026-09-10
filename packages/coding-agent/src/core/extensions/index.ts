@@ -85,6 +85,7 @@ export type {
 	ExtensionRpcRequestHandler,
 	// Runtime
 	ExtensionRuntime,
+	ExtensionSessionSettings,
 	ExtensionShortcut,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
@@ -123,6 +124,7 @@ export type {
 	ModelSelectEvent,
 	ModelSelectEventResult,
 	ModelSelectSource,
+	ModelSwitchOptions,
 	PowerShellToolCallEvent,
 	PowerShellToolResultEvent,
 	ProjectTrustContext,
@@ -157,6 +159,7 @@ export type {
 	SessionCompactFailedEvent,
 	SessionEvent,
 	SessionInfoChangedEvent,
+	SessionModelPolicy,
 	SessionShutdownEvent,
 	// Events - Session
 	SessionStartEvent,

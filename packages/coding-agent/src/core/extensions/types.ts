@@ -315,8 +315,30 @@ export interface RetryFallbackStatus {
 	pinned: boolean;
 }
 
-/** Narrow session-owned settings access for extensions that manage retry fallback. */
+export interface SessionModelPolicy {
+	/** Ordered, exact provider/model IDs. No implicit provider or default-chain expansion. */
+	models: readonly { model: string; thinkingLevel?: ThinkingLevel }[];
+}
+
+/**
+ * How a model switch should be attributed. A deliberate switch is a user picking a model and takes
+ * the MAIN slot away from a declared policy; a non-deliberate one is a programmatic swap by a
+ * builtin (fast mode, a startup recommendation) and leaves policy ownership untouched.
+ */
+export interface ModelSwitchOptions {
+	deliberate?: boolean;
+}
+
+/** Settings commands persist; setModelPolicy is the session-only override boundary. */
 export interface ExtensionSessionSettings {
+	/** Replace the session policy, or clear it. Never writes settings.json. */
+	setModelPolicy?(policy: SessionModelPolicy | undefined): Promise<void>;
+	/**
+	 * Hand the MAIN slot back to the declared policy and apply it now. The way out of a manual
+	 * override without discarding the conversation. Rejects when no policy is configured or none of
+	 * its models has configured auth, leaving the active model untouched.
+	 */
+	followConfiguredModel?(): Promise<void>;
 	getRetryFallbackSettings(): RetryFallbackSettings;
 	setFallbackChain(key: string, entries: readonly string[]): Promise<void>;
 	removeFallbackChain(key: string): Promise<void>;
@@ -1142,7 +1164,15 @@ export interface ToolExecutionEndEvent {
 // Model Events
 // ============================================================================
 
-export type ModelSelectSource = "set" | "cycle" | "restore" | "fallback" | "fallback-revert";
+/**
+ * Why the active model changed.
+ *
+ * `policy` is a declared session model policy selecting the model - on startup, when the declared
+ * chain changes, or when the user hands the slot back. It is deliberately distinct from `restore`,
+ * which means the model was restored from session history: a consumer showing where the current
+ * model came from must be able to tell a configured chain from a resumed conversation.
+ */
+export type ModelSelectSource = "set" | "cycle" | "configured" | "restore" | "fallback" | "fallback-revert";
 
 /** Fired when a new model is selected */
 export interface ModelSelectEvent {
@@ -1846,10 +1876,11 @@ export interface ExtensionAPI {
 	// =========================================================================
 
 	/**
-	 * Set the model for the current session without changing the configured default for new sessions.
+	 * Set the current model and persisted default for new sessions.
 	 * Returns false if authentication is not configured for the model's provider.
+	 * Defaults to programmatic attribution; pass deliberate: true for a user selection.
 	 */
-	setModel(model: Model<any>): Promise<boolean>;
+	setModel(model: Model<any>, options?: ModelSwitchOptions): Promise<boolean>;
 
 	/** Get current thinking level. */
 	getThinkingLevel(): ThinkingLevel;
@@ -1863,8 +1894,9 @@ export interface ExtensionAPI {
 	/**
 	 * Set the model for this session only, leaving the user's persisted default
 	 * model untouched. Returns false if no API key is available.
+	 * Defaults to programmatic attribution; pass deliberate: true for a user selection.
 	 */
-	setSessionModel(model: Model<any>): Promise<boolean>;
+	setSessionModel(model: Model<any>, options?: ModelSwitchOptions): Promise<boolean>;
 
 	/** Set thinking level for this session only (clamped), leaving the persisted default untouched. */
 	setSessionThinkingLevel(level: ThinkingLevel): void;
@@ -2184,7 +2216,7 @@ export type RefreshToolsHandler = () => void;
 
 export type RegisterRemovedToolHintHandler = (name: string, hint: string) => void;
 
-export type SetModelHandler = (model: Model<any>) => Promise<boolean>;
+export type SetModelHandler = (model: Model<any>, options?: ModelSwitchOptions) => Promise<boolean>;
 
 export type GetThinkingLevelHandler = () => ThinkingLevel;
 

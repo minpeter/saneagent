@@ -1,5 +1,23 @@
 # TUI delta rendering fork changes
 
+## 2026-09-09 - Preserve explicit slash-command arguments on submit
+
+### What changed
+
+- `packages/tui/src/components/editor.ts`: cancels stale slash command-name autocomplete before Enter submission when the editor already contains an argument, preserving the literal command text.
+
+### Why
+
+- `packages/tui/src/components/editor.ts`: `/model configured` could be transformed into `/model model` when argument input arrived before asynchronous autocomplete refreshed, causing model search instead of configured dispatch. A stale `/mod` prefix must also preserve a later completed command plus argument.
+
+### Why an extension could not handle it
+
+- `packages/tui/src/components/editor.ts`: Enter handling and autocomplete state are owned by the TUI editor before command dispatch.
+
+### Expected merge conflict zones
+
+- LOW: `packages/tui/src/components/editor.ts` autocomplete submission handling.
+
 ## 2026-09-04 - Port upstream terminal capability overrides
 
 ### What changed

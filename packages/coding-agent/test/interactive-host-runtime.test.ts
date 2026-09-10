@@ -27,6 +27,7 @@ import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { RpcClient } from "../src/modes/rpc/rpc-client.ts";
 import { startFakeModelServer } from "./helpers/rpc-fake-model.ts";
 import { hermeticProviderEnv, MOCK_MODEL, MOCK_PROVIDER, writeRpcModelsJson } from "./helpers/rpc-hermetic.ts";
+import { createHarness } from "./suite/harness.ts";
 
 const roots: string[] = [];
 const children: ChildProcessWithoutNullStreams[] = [];
@@ -158,6 +159,84 @@ async function waitForHost(child: ChildProcessWithoutNullStreams, socket: string
 }
 
 describe("interactive host runtime", () => {
+	it.each([false, true])(
+		"rejects configured declaration mutation at the real UDS boundary (removal=%s)",
+		async (removal) => {
+			const qa = scratch("policy-boundary");
+			// No provider request is needed: this exercises the real CLI host and transport state.
+			writeRpcModelsJson(qa.agentDir, "http://127.0.0.1:1");
+			const host = spawnHost(qa);
+			await waitForHost(host, qa.socket);
+			const client = new RpcClient({ socketPath: qa.socket });
+			const h = await createHarness({ models: [{ id: "primary" }, { id: "outside" }] });
+			try {
+				await client.start();
+				await client.openSession({ cwd: qa.cwd, provider: MOCK_PROVIDER, modelId: MOCK_MODEL });
+				const declaration = { models: [{ model: "faux/outside" }] };
+				if (removal) await h.session.setModelPolicy(declaration);
+				const hostState = await client.getState();
+				const hostEntries = await client.getEntries();
+				const { session } = createRemoteSessionProxy(h.session, h.tempDir, client, hostState);
+				const snapshot = () =>
+					structuredClone({
+						declaration: h.session.hasConfiguredModel,
+						owned: h.session.isConfiguredModelOwned,
+						policy: Reflect.get(h.session, "_modelPolicy"),
+						revision: Reflect.get(h.session, "_modelPolicyRevision"),
+						fallback: h.session.getRetryFallbackSettings(),
+						history: h.sessionManager.getEntries(),
+						model: h.session.model,
+						thinking: h.session.thinkingLevel,
+						prompt: h.session.systemPrompt,
+						messages: h.session.messages,
+						events: h.events,
+						settings: h.settingsManager.getGlobalSettings(),
+					});
+				const localBefore = snapshot();
+				expect(session.hasConfiguredModel).toBe(false);
+				expect(session.isConfiguredModelOwned).toBe(false);
+				await expect(session.followConfiguredModel()).rejects.toThrow();
+				let rejected = false;
+				try {
+					await session.setModelPolicy(removal ? undefined : declaration);
+				} catch {
+					rejected = true;
+				}
+				// Check both stores even on RED; rejection alone cannot prove absence of mutation.
+				expect.soft(snapshot()).toEqual(localBefore);
+				expect.soft(await client.getState()).toEqual(hostState);
+				expect.soft(await client.getEntries()).toEqual(hostEntries);
+				expect(rejected).toBe(true);
+				// The read trap cannot see a direct property write or delete: both bypass `get`
+				// entirely and land on the local target, so a caller could install or erase a
+				// configured declaration on the mirror that the authoritative host never saw.
+				const configuredSurface = [
+					"setModelPolicy",
+					"followConfiguredModel",
+					"hasConfiguredModel",
+					"isConfiguredModelOwned",
+				] as const;
+				for (const property of configuredSurface) {
+					expect(() => {
+						(session as unknown as Record<string, unknown>)[property] = removal ? undefined : declaration;
+					}).toThrow();
+					expect(() => {
+						delete (session as unknown as Record<string, unknown>)[property];
+					}).toThrow();
+				}
+				expect.soft(snapshot()).toEqual(localBefore);
+				expect.soft(await client.getState()).toEqual(hostState);
+				expect.soft(await client.getEntries()).toEqual(hostEntries);
+				// Reads stay closed after the rejected writes.
+				expect(session.hasConfiguredModel).toBe(false);
+				expect(session.isConfiguredModelOwned).toBe(false);
+				await expect(session.followConfiguredModel()).rejects.toThrow();
+			} finally {
+				await client.stop();
+				h.cleanup();
+			}
+		},
+	);
 	it("re-registers rendered capability and last width after reconnect", async () => {
 		const setClientInfo = vi.fn(async () => {});
 		const runtime = new RemoteInteractiveRuntime({} as AgentSessionRuntime, {} as never, { setClientInfo } as never);
@@ -265,17 +344,21 @@ describe("interactive host runtime", () => {
 			ensureHost: async () => undefined,
 			onWarning: vi.fn(),
 		});
+		const footerData = new FooterDataProvider(qa.cwd);
 		try {
 			await runtime.session.setSessionName("host-footer-name");
 			await runtime.session.prompt("footer context");
-			const footer = new FooterComponent(runtime.session, new FooterDataProvider(qa.cwd));
+			const branch = footerData.getGitBranch();
+			const footer = new FooterComponent(runtime.session, footerData);
 			const rendered = stripAnsi(footer.render(240).join("\n"));
 			expect(runtime.session.sessionManager.getCwd()).toBe(qa.cwd);
 			expect(runtime.session.sessionManager.getSessionName()).toBe("host-footer-name");
 			expect(runtime.session.getContextUsage()).toEqual(expect.objectContaining({ contextWindow: 1000000 }));
-			expect(rendered).toContain(`${qa.cwd} • host-footer-name`);
+			const identitySegments = [qa.cwd, ...(branch ? [branch] : []), "host-footer-name"];
+			expect(rendered.split(" • ").slice(0, identitySegments.length)).toEqual(identitySegments);
 			expect(rendered).toMatch(/\d+\/1M \([0-9.]+%\)/);
 		} finally {
+			footerData.dispose();
 			await runtime.dispose();
 			await fake.close();
 		}
@@ -1099,11 +1182,28 @@ describe("interactive host runtime", () => {
 		});
 		const observer = new RpcClient({ socketPath: qa.socket });
 		await observer.start();
+		const mirroredSetupEntries: string[] = [];
+		const stopObserving = runtime.session.subscribe((event) => {
+			if (
+				event.type === "entry_appended" &&
+				(event.entry.type === "session_info" ||
+					(event.entry.type === "custom" && event.entry.customType === "setup-state"))
+			) {
+				mirroredSetupEntries.push(event.entry.id);
+			}
+		});
+		let setupEntries: ReturnType<SessionManager["getEntries"]> = [];
+		const rebind = vi.fn(async () => {
+			expect(mirroredSetupEntries).toEqual(setupEntries.map((entry) => entry.id));
+			expect(runtime.session.sessionManager.getEntries().slice(-2)).toEqual(setupEntries);
+		});
+		runtime.setRebindSession(rebind);
 		try {
 			await runtime.newSession({
 				setup: async (manager) => {
 					manager.appendCustomEntry("setup-state", { marker: true });
 					manager.appendSessionInfo("setup session");
+					setupEntries = manager.getEntries();
 				},
 				withSession: async (ctx) => {
 					expect(ctx.sessionManager.getEntries()).toEqual(
@@ -1120,6 +1220,11 @@ describe("interactive host runtime", () => {
 			await observer.openSession({ sessionPath: hostSession.sessionPath, cwd: qa.cwd });
 			const entries = await observer.getEntries();
 			const state = await observer.getState();
+			expect(rebind).toHaveBeenCalledTimes(1);
+			expect(entries.entries).toHaveLength(4);
+			expect(entries.entries.slice(-2)).toEqual(setupEntries);
+			// Host and client share this file; notifications must not write it again.
+			expect(SessionManager.open(hostSession.sessionPath).getEntries()).toEqual(entries.entries);
 			expect(state.sessionName).toBe("setup session");
 			expect(runtime.session.sessionManager.getEntries()).toEqual(entries.entries);
 			expect(runtime.session.sessionManager.getSessionName()).toBe("setup session");
@@ -1130,6 +1235,8 @@ describe("interactive host runtime", () => {
 				]),
 			);
 		} finally {
+			stopObserving();
+			runtime.setRebindSession(undefined);
 			await observer.stop();
 			await runtime.dispose();
 			await fake.close();

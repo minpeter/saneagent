@@ -94,6 +94,7 @@ import { buildHighReasoningWarning } from "../../core/high-reasoning-warning.ts"
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
+import { resolveModelCommandAction } from "../../core/model-command-action.ts";
 import {
 	defaultModelPerProvider,
 	findExactModelReferenceMatch,
@@ -1204,7 +1205,22 @@ export class InteractiveMode {
 						? this.session.scopedModels.map((s) => s.model)
 						: this.session.modelRuntime.getAvailableSnapshot();
 
-				if (models.length === 0) return null;
+				const policyItems = this.session.hasConfiguredModel
+					? createFuzzyAutocompleteItems(
+							[
+								{
+									value: "configured",
+									label: "Use configured model",
+									description: "Return model selection to the configured model order and fallback chain.",
+								},
+							],
+							prefix,
+							(item) => `${item.value} ${item.label}`,
+							(item) => item,
+						)
+					: null;
+
+				if (models.length === 0) return policyItems;
 
 				// Create items with provider/id format
 				const items = models.map((m) => ({
@@ -1214,11 +1230,12 @@ export class InteractiveMode {
 					label: `${m.provider}/${m.id}`,
 				}));
 
-				return createFuzzyAutocompleteItems(items, prefix, getModelSearchText, (item) => ({
+				const modelItems = createFuzzyAutocompleteItems(items, prefix, getModelSearchText, (item) => ({
 					value: item.label,
 					label: item.id,
 					description: item.provider,
 				}));
+				return policyItems || modelItems ? [...(policyItems ?? []), ...(modelItems ?? [])] : null;
 			};
 		}
 
@@ -4920,6 +4937,7 @@ export class InteractiveMode {
 			}
 
 			case "model_changed":
+				this.footer?.setModelSelectSource?.(event.source);
 				// Shared-host/other-client model switches arrive as model_changed wire
 				// events; the new model must not inherit the previous model's
 				// SDK-delegation episode (post-#1188 core emits no repeat rejection to
@@ -6878,18 +6896,46 @@ export class InteractiveMode {
 	}
 
 	private async handleModelCommand(searchTerm?: string): Promise<void> {
-		if (!searchTerm) {
+		const action = resolveModelCommandAction(searchTerm, { hasConfiguredModel: this.session.hasConfiguredModel });
+		if (action.kind === "open-selector") {
 			this.showModelSelector();
 			return;
 		}
+		if (action.kind === "error") {
+			this.showError(action.message);
+			return;
+		}
+		if (action.kind === "follow-configured") {
+			await this.followConfiguredModelFromUi();
+			return;
+		}
 
-		const model = await this.findExactModelMatch(searchTerm);
+		const model = await this.findExactModelMatch(action.searchTerm);
 		if (model) {
 			await this.selectModelFromUi(model);
 			return;
 		}
 
-		this.showModelSelector(searchTerm);
+		this.showModelSelector(action.searchTerm);
+	}
+
+	/**
+	 * Hand the MAIN slot back to the configured chain. Failures (no authenticated model in the
+	 * policy) are reported like any other model switch failure rather than escaping into the UI.
+	 */
+	private async followConfiguredModelFromUi(): Promise<void> {
+		try {
+			const systemPromptChange = await this.session.followConfiguredModel();
+			this.footer.invalidate();
+			this.updateEditorBorderColor();
+			const applied = systemPromptChange?.systemPromptName
+				? ` (optimized system prompt applied: ${systemPromptChange.systemPromptName})`
+				: "";
+			const model = this.session.model;
+			this.showStatus(`Model: ${model?.id ?? "unknown"} (following configured model selection)${applied}`);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
 	}
 
 	private async findExactModelMatch(searchTerm: string): Promise<Model<any> | undefined> {
@@ -7134,6 +7180,14 @@ export class InteractiveMode {
 					onFavoriteChange: async (favoriteIds, allModels) => {
 						await this.applyFavoriteSelection(favoriteIds, allModels, true, await favoritePatternSnapshot);
 					},
+					configuredOwned: this.session.isConfiguredModelOwned,
+					onFollowConfiguredModel: this.session.hasConfiguredModel
+						? () => {
+								done();
+								this.ui.requestRender();
+								void this.followConfiguredModelFromUi();
+							}
+						: undefined,
 				},
 			);
 			return {

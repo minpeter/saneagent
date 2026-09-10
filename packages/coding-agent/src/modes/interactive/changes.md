@@ -1,3 +1,101 @@
+## 2026-09-09 - Mirror shared-host entries without a second disk writer
+
+### What changed
+
+- `packages/coding-agent/src/modes/interactive/interactive-host-runtime.ts`: entry notifications and authoritative refresh backfills append to the local mirror with persistence disabled. Shared-host clients suppress configured ownership/actions and reject both `setModelPolicy(policy)` and `setModelPolicy(undefined)` at the proxy boundary, leaving the local mirror and authoritative host unchanged. The whole configured surface (`hasConfiguredModel`, `isConfiguredModelOwned`, `followConfiguredModel`, `setModelPolicy`) is also closed to direct property writes and deletes, which bypass the `get` trap entirely and would otherwise land on the local target.
+
+### Why
+
+- `packages/coding-agent/src/modes/interactive/interactive-host-runtime.ts`: the host already owns the shared JSONL. Re-persisting notifications duplicated setup-state and session_info entries after manual startup selection made the file durable before the first assistant response. The declaration setter previously fell through to the local mirror and silently accepted assignment/removal that the host never received. Intercepting reads alone left the same hole open one level down: `session.setModelPolicy = ...` and `delete session.hasConfiguredModel` never consult `get`, so a client could still install or erase a declaration the authoritative host never saw.
+
+### Why an extension could not handle it
+
+- `packages/coding-agent/src/modes/interactive/interactive-host-runtime.ts`: the RPC mirror handles these events below extension dispatch; deduplicating records would conceal the extra writer rather than remove it.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/modes/interactive/interactive-host-runtime.ts`: `entry_appended` handling, `performRefresh` backfill, and configured API interception in the session proxy's `get`, `set`, and `deleteProperty` traps.
+
+## 2026-09-08 - Recommend configured policy in model autocomplete
+
+### What changed
+
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`: offer the `configured` action before matching model arguments only when a session policy is configured, including when the catalog is empty. Preserve existing model completions and argument submission semantics.
+- `packages/coding-agent/src/modes/interactive/components/model-selector.ts`: label the action `Use configured model`, retaining the description `Return model selection to the configured model order and fallback chain.` and existing ownership, checkmark, alignment, and favorite behavior.
+
+### Why
+
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`: typing `/model configured` in the main editor previously recommended fuzzy model matches rather than the available policy action.
+- `packages/coding-agent/src/modes/interactive/components/model-selector.ts`: the picker should identify the action consistently with the main editor recommendation.
+
+### Why an extension could not handle it
+
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`: the built-in model command owns its argument completion provider.
+- `packages/coding-agent/src/modes/interactive/components/model-selector.ts`: the engine owns the policy action row and its displayed label.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`: `createBaseAutocompleteProvider` model argument completion callback.
+- `packages/coding-agent/src/modes/interactive/components/model-selector.ts`: policy action initialization.
+
+## 2026-09-08 - Preserve policy picker focus through catalog changes
+
+### What changed
+
+- `packages/coding-agent/src/modes/interactive/components/model-selector.ts`: retain the selected action or model by row identity across catalog refresh and scope switching. Initial policy-owned focus remains on the policy action; explicit arrow navigation is not reset by later catalog updates.
+
+### Why
+
+- Scope switching reset policy focus to the current model, while asynchronous refresh reset a user's browsed model to policy. Reusing numeric indices also fails when scope order differs.
+
+### Why an extension could not handle it
+
+- The engine component owns picker focus and catalog reconstruction.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/modes/interactive/components/model-selector.ts`: refreshModels, setScope, and filterModels selection restoration.
+
+## 2026-09-08 - Render policy provenance from the current session
+
+### What changed
+
+- `packages/coding-agent/src/modes/interactive/components/footer.ts`: seed current model provenance from the session rather than relying only on events; clear cached wire-event provenance when the session is rebound.
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`: remove the duplicate footer setter call while preserving shared-host wire updates.
+
+### Why
+
+- Startup binds extensions before subscribing to model events. A correctly selected policy model therefore lost its label on relaunch, and a cached label could leak across session replacement. Rendering from the current session fixes both without persisting a display flag.
+
+### Why an extension could not handle it
+
+- Footer state and startup subscription ordering are engine-owned.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/modes/interactive/components/footer.ts`: model label prefix.
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`: model_changed handling.
+
+
+## 2026-09-08 - Return to configured policy from the model picker
+
+### What changed
+
+- `packages/coding-agent/src/modes/interactive/components/model-selector.ts` renders a searchable policy action separately from models. Enter dispatches it without persisting a model default; favorite toggles ignore it. Catalog refresh and scope changes retain the action.
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts` supplies the action only when a session policy exists, closes the selector and repaints before invoking the existing policy-return success/error path.
+
+### Why
+
+- Users must be able to return model ownership to configured policy inside the actual picker rather than knowing a special command argument.
+
+### Why an extension could not handle it
+
+- The engine owns model-picker rows, favorite handling, and overlay disposal; the existing extension policy API cannot insert a non-model picker action.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/modes/interactive/components/model-selector.ts`: selector options, filtering, rendering, and input dispatch.
+- `packages/coding-agent/src/modes/interactive/interactive-mode.ts`: `showModelSelector` options and callbacks.
 
 ## 2026-09-08 - Shortcut context exposes the effective service tier
 

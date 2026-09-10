@@ -216,11 +216,13 @@ A message in the conversation. The `message` field contains an `AgentMessage`.
 
 ### ModelChangeEntry
 
-Emitted when the user switches models mid-session.
+Records an accepted model selection, including startup and configured selection.
 
 ```json
-{"type":"model_change","id":"d4e5f6g7","parentId":"c3d4e5f6","timestamp":"2024-12-03T14:05:00.000Z","provider":"openai","modelId":"gpt-4o"}
+{"type":"model_change","id":"d4e5f6g7","parentId":"c3d4e5f6","timestamp":"2024-12-03T14:05:00.000Z","provider":"openai","modelId":"gpt-4o","selectionIntent":"manual"}
 ```
+
+Optional `selectionIntent` is `"configured"`, `"manual"`, `"programmatic"`, or `"scoped"`. Configured intent allows a declaration to select again after restart; manual intent preserves a deliberate override, including an explicit launch before the first message. Explicit startup selections are persisted immediately after successful admission, even with zero messages; rejected startup selections leave history unchanged. A startup pick derived from model narrowing (`--models`, `scopedModels`) records `"scoped"` intent, so a configured declaration can regain ownership when the persisted conversation is resumed without narrowing. Narrowing selects which models are reachable in one launch rather than which model the user chose. Programmatic selections do not transfer ownership. Legacy history without intent retains its override semantics. Transient fallback entries use `reason: "fallback"` or `"fallback-revert"` and do not replace the last owning selection. Rejected or stale admissions append no model selection.
 
 ### ThinkingLevelChangeEntry
 

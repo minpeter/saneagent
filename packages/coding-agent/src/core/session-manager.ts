@@ -126,6 +126,8 @@ export interface ModelChangeEntry extends SessionEntryBase {
 	/** The model active before a fallback window, retained for restart restoration. */
 	originalProvider?: string;
 	originalModelId?: string;
+	/** Exact selection intent; omitted by legacy histories. Scoped defaults yield to configured selection on resume. */
+	selectionIntent?: "configured" | "manual" | "programmatic" | "scoped";
 }
 
 export interface CompactionEntry<T = unknown> extends SessionEntryBase {
@@ -1070,7 +1072,10 @@ export class SessionManager {
 		const persistedEntry = this.residentStore.materialize(entry);
 
 		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
-		if (!hasAssistant) {
+		// A deliberate model choice is meaningful session state even before the first assistant
+		// response. Persist it immediately so reopening an otherwise empty conversation does not
+		// silently turn the user's override back into policy ownership.
+		if (!hasAssistant && !(entry.type === "model_change" && entry.selectionIntent === "manual")) {
 			if (this.flushed) {
 				appendFileSync(this.sessionFile, `${JSON.stringify(persistedEntry)}\n`);
 			} else {
@@ -1095,7 +1100,7 @@ export class SessionManager {
 		}
 	}
 
-	private _appendEntry(entry: SessionEntry): void {
+	private _appendEntry(entry: SessionEntry, persist = true): void {
 		const residentEntry = this.residentStore.externalize(entry);
 		this.fileEntries.push(residentEntry);
 		this.byId.set(residentEntry.id, residentEntry);
@@ -1103,15 +1108,16 @@ export class SessionManager {
 		this.leafId = residentEntry.id;
 		this._accumulateUsage(residentEntry);
 		this.mutationCount++;
-		this._persist(residentEntry);
+		if (persist) this._persist(residentEntry);
 	}
 
 	/**
 	 * Append an already-materialized entry without rewriting its identity or tree
 	 * fields. This is the transport seam for entries captured by another manager.
+	 * Client mirrors pass persist: false because the authoritative host owns disk writes.
 	 */
-	appendEntry(entry: SessionEntry): void {
-		this._appendEntry(entry);
+	appendEntry(entry: SessionEntry, options?: { persist?: boolean }): void {
+		this._appendEntry(entry, options?.persist ?? true);
 		const order = this.entryOrdersById.get(entry.id);
 		if (entry.type === "message" && order !== undefined) {
 			this.messageEntryPositions.set(entry.message, { entryId: entry.id, order });
@@ -1243,6 +1249,7 @@ export class SessionManager {
 		reason?: "fallback" | "fallback-revert",
 		originalProvider?: string,
 		originalModelId?: string,
+		selectionIntent?: ModelChangeEntry["selectionIntent"],
 	): string {
 		const entry: ModelChangeEntry = {
 			type: "model_change",
@@ -1254,6 +1261,7 @@ export class SessionManager {
 			reason,
 			originalProvider,
 			originalModelId,
+			selectionIntent,
 		};
 		this._appendEntry(entry);
 		return entry.id;

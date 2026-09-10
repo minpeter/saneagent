@@ -60,6 +60,11 @@ export interface CreateAgentSessionFromServicesOptions {
 	sessionManager: SessionManager;
 	sessionStartEvent?: SessionStartEvent;
 	model?: Model<any>;
+	/**
+	 * How `model` was chosen. Startup intent depends on it: a narrowing default is not a
+	 * model the user picked, so it must not be recorded as durable manual intent.
+	 */
+	initialModelProvenance?: CreateAgentSessionOptions["initialModelProvenance"];
 	thinkingLevel?: ThinkingLevel;
 	thinkingSelection?: ThinkingSelection;
 	scopedModels?: Array<{
@@ -232,6 +237,7 @@ export async function createAgentSessionFromServices(
 		resourceLoader: options.services.resourceLoader,
 		sessionManager: options.sessionManager,
 		model: options.model,
+		initialModelProvenance: options.initialModelProvenance,
 		thinkingLevel: options.thinkingLevel,
 		thinkingSelection: options.thinkingSelection,
 		scopedModels: options.scopedModels,

@@ -817,6 +817,17 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 
+		// Argument input can arrive before the async command-name suggestions refresh.
+		// Never accept that stale menu on Enter after the user has supplied arguments.
+		if (
+			kb.matches(data, "tui.input.submit") &&
+			this.autocompletePrefix.startsWith("/") &&
+			!this.autocompletePrefix.includes(" ") &&
+			/^\/\S+\s/.test(this.state.lines[this.state.cursorLine] ?? "")
+		) {
+			this.cancelAutocomplete();
+		}
+
 		// Handle autocomplete mode
 		if (this.autocompleteState && this.autocompleteList) {
 			if (kb.matches(data, "tui.select.cancel")) {
