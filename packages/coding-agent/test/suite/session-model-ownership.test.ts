@@ -30,7 +30,11 @@ describe("configured model ownership", () => {
 		});
 		harnesses.push(h);
 		let policy: SessionModelPolicy | undefined = { models: [{ model: "faux/faux-2", thinkingLevel: "high" }] };
-		const settings = SettingsManager.inMemory({ defaultProvider: "faux", defaultModel: "faux-1" });
+		const settings = SettingsManager.inMemory({
+			defaultProvider: "faux",
+			defaultModel: "faux-1",
+			retry: { maxRetries: 0, baseDelayMs: 0 },
+		});
 		if (resumed) {
 			h.sessionManager.appendModelChange("faux", "faux-3");
 			h.sessionManager.appendMessage({ role: "user", content: "previous", timestamp: 1 });
@@ -109,9 +113,11 @@ describe("configured model ownership", () => {
 	it("#given a fallback window #when a changed policy arrives #then a machine event does not take ownership", async () => {
 		const h2 = await setup();
 		const { h, session, changePolicy } = h2;
-		// A single-entry policy disables cross-model fallback, so widen it first.
-		changePolicy({ models: [{ model: "faux/faux-2", thinkingLevel: "high" }, { model: "faux/faux-3" }] });
-		await session.reload();
+		// Widen the precondition directly: reload clears the harness's faux API registration.
+		// The reload under test remains below, after a successful fallback turn.
+		await session.setModelPolicy({
+			models: [{ model: "faux/faux-2", thinkingLevel: "high" }, { model: "faux/faux-3" }],
+		});
 		expect(session.model?.id).toBe("faux-2");
 
 		// Open a real fallback window: the primary errors, the chain moves on.
@@ -121,6 +127,10 @@ describe("configured model ownership", () => {
 			fauxAssistantMessage("ok"),
 		]);
 		await session.prompt("open a fallback window");
+		// Both scripted responses must run; registration errors must not masquerade as fallback.
+		expect(h.faux.getCallLog().map((call) => call.modelId)).toEqual(["faux-2", "faux-3"]);
+		expect(session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		expect(h.getPendingResponseCount()).toBe(0);
 		// The window is observable on the session that actually ran the turn.
 		expect(session.model?.id).toBe("faux-3");
 
