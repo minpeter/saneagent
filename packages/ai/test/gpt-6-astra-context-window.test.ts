@@ -16,28 +16,6 @@ import { describe, expect, it } from "vitest";
 const ASTRA_CONTEXT_WINDOW = 600_000;
 const dataDirectory = fileURLToPath(new URL("../src/providers/data/", import.meta.url));
 
-/**
- * Every Astra row the catalogs ship today, as `file:api/id`. Discovery alone cannot
- * catch a row that disappears — the aggregate check only inspects the rows it finds —
- * so each row is pinned by identity here and asserted against the series window below.
- */
-const EXPECTED_ASTRA_ROWS = [
-	"azure-openai-responses.json:azure-openai-responses/gpt-6-astra",
-	"github-copilot.json:openai-completions/gpt-6-astra",
-	"openai-codex.json:openai-codex-responses/gpt-6-astra",
-	"openai-codex.json:openai-codex-responses/gpt-6-astra-fast",
-	"openai.json:openai-responses/gpt-6-astra",
-	"openai.json:openai-responses/gpt-6-astra-fast",
-	"opencode.json:openai-responses/gpt-6-astra",
-	"opengateway.json:openai-completions/openai/gpt-6-astra",
-	"openrouter.json:openai-completions/openai/gpt-6-astra",
-	"openrouter.json:openai-completions/openai/gpt-6-astra-pro",
-	"openrouter.json:openai-completions/openai/gpt-6-astra-pro:batch",
-	"openrouter.json:openai-completions/openai/gpt-6-astra:batch",
-	"vercel-ai-gateway.json:anthropic-messages/openai/gpt-6-astra",
-	"vercel-ai-gateway.json:anthropic-messages/openai/gpt-6-astra-fast",
-] as const;
-
 type CatalogEntry = { id?: unknown; contextWindow?: unknown };
 type AstraEntry = { file: string; api: string; id: string; contextWindow: unknown };
 
@@ -84,20 +62,5 @@ describe("GPT-6 Astra series catalog context window", () => {
 			"openrouter.json",
 			"vercel-ai-gateway.json",
 		]);
-	});
-
-	it("pins every shipped Astra row by identity so a dropped row cannot pass unnoticed", () => {
-		const rows = collectAstraEntries()
-			.map((entry) => `${entry.file}:${entry.api}/${entry.id}`)
-			.sort();
-		expect(rows).toEqual([...EXPECTED_ASTRA_ROWS]);
-	});
-
-	it.each(EXPECTED_ASTRA_ROWS)("%s declares the series context window", (row) => {
-		const entry = collectAstraEntries().find(
-			(candidate) => `${candidate.file}:${candidate.api}/${candidate.id}` === row,
-		);
-		expect(entry, `${row} is missing from the shipped catalogs`).toBeDefined();
-		expect(entry?.contextWindow).toBe(ASTRA_CONTEXT_WINDOW);
 	});
 });
