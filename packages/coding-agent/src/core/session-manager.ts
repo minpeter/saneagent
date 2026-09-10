@@ -126,8 +126,8 @@ export interface ModelChangeEntry extends SessionEntryBase {
 	/** The model active before a fallback window, retained for restart restoration. */
 	originalProvider?: string;
 	originalModelId?: string;
-	/** Exact selection intent; omitted by legacy histories. Machine switches do not claim ownership. */
-	selectionIntent?: "configured" | "manual" | "programmatic";
+	/** Exact selection intent; omitted by legacy histories. Scoped defaults yield to configured selection on resume. */
+	selectionIntent?: "configured" | "manual" | "programmatic" | "scoped";
 }
 
 export interface CompactionEntry<T = unknown> extends SessionEntryBase {

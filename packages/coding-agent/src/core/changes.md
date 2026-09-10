@@ -1,3 +1,25 @@
+## 2026-09-10 - Admit startup intent before persistence and distinguish scoped history
+
+### What changed
+
+- `packages/coding-agent/src/core/sdk.ts`: startup model/thinking history is appended after eager admission succeeds; accepted explicit selections still flush immediately with zero messages. Scope-derived startup picks record `scoped` intent, and exact resume permits configured selection from that provenance.
+- `packages/coding-agent/src/core/session-manager.ts`: `ModelChangeEntry.selectionIntent` includes `scoped`, distinct from absent legacy intent and deliberate `manual` intent. Persistence timing and fallback/programmatic semantics are unchanged.
+
+### Why
+
+- `packages/coding-agent/src/core/sdk.ts`: an explicit unusable model previously wrote durable manual intent before throwing, poisoning both saved-session resumes and fresh launch paths. Omitting scope intent also made persisted transcripts look like legacy manual overrides on subsequent resume.
+- `packages/coding-agent/src/core/session-manager.ts`: typed scope provenance is necessary to restore configured eligibility without inferring ownership from model equality or reclassifying legacy history.
+
+### Why an extension could not handle it
+
+- `packages/coding-agent/src/core/sdk.ts`: startup admission, history publication and ownership restoration run before extensions bind.
+- `packages/coding-agent/src/core/session-manager.ts`: the core JSONL entry contract owns persisted selection provenance.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/core/sdk.ts`: latest owning selection, startup history append and eager admission ordering.
+- `packages/coding-agent/src/core/session-manager.ts`: `ModelChangeEntry.selectionIntent`.
+
 ## 2026-09-09 - Close the remaining startup and session-boundary gaps in configured selection
 
 ### What changed

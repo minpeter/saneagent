@@ -522,7 +522,7 @@ describe("configured model independent review regressions", () => {
 		const startupEntry = manager.getBranch().findLast((entry) => entry.type === "model_change");
 		expect(
 			startupEntry?.type === "model_change" ? [startupEntry.modelId, startupEntry.selectionIntent] : undefined,
-		).toEqual(["tiny", undefined]);
+		).toEqual(["tiny", "scoped"]);
 		// Reopening without the narrowing hands the slot back to a declaration.
 		const reopened = await launch(h, { manager });
 		await reopened.session.bindExtensions({ shutdownHandler() {} });
@@ -562,7 +562,7 @@ describe("configured model independent review regressions", () => {
 		const entry = manager.getBranch().findLast((candidate) => candidate.type === "model_change");
 		expect(entry?.type === "model_change" ? [entry.modelId, entry.selectionIntent] : undefined).toEqual([
 			"tiny",
-			undefined,
+			"scoped",
 		]);
 	});
 

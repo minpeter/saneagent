@@ -264,7 +264,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		.getBranch()
 		.findLast((entry) => entry.type === "model_change" && !entry.reason && entry.selectionIntent !== "programmatic");
 	const followsPolicy =
-		lastModelSelection?.type === "model_change" && lastModelSelection.selectionIntent === "configured";
+		lastModelSelection?.type === "model_change" &&
+		(lastModelSelection.selectionIntent === "configured" || lastModelSelection.selectionIntent === "scoped");
 	const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
 
 	let model = options.model;
@@ -515,29 +516,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// later resume of the session, long after the narrowing flag is gone.
 	const hasExplicitModelSelection = options.model !== undefined && initialModelProvenance !== "scoped";
 
-	// Preserve durable manual intent even before the first conversation message.
 	if (hasExistingSession || hasPersistedManualSelection) {
 		agent.state.messages = existingSession.messages;
-		// An explicit launch selection also replaces any previously recorded policy intent.
-		if (hasExplicitModelSelection && model) {
-			sessionManager.appendModelChange(model.provider, model.id, undefined, undefined, undefined, "manual");
-		}
-		if (!hasThinkingEntry) {
-			sessionManager.appendThinkingLevelChange(thinkingLevel, thinkingSelection);
-		}
-	} else {
-		// Save initial model and thinking level for new sessions so they can be restored on resume
-		if (model) {
-			sessionManager.appendModelChange(
-				model.provider,
-				model.id,
-				undefined,
-				undefined,
-				undefined,
-				hasExplicitModelSelection ? "manual" : undefined,
-			);
-		}
-		sessionManager.appendThinkingLevelChange(thinkingLevel, thinkingSelection);
 	}
 
 	const sessionStartEvent = initialModelProvenance
@@ -592,6 +572,29 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			liveContextTokens,
 			hasExistingSession ? { includeSpeculationLead: false, admission: "resume" } : { admission: "start" },
 		);
+	}
+
+	// Publish startup history only after eager admission succeeds. Manual selections flush
+	// immediately, so writing them earlier would make a rejected launch poison future resumes.
+	if (hasExistingSession || hasPersistedManualSelection) {
+		if (hasExplicitModelSelection && model) {
+			sessionManager.appendModelChange(model.provider, model.id, undefined, undefined, undefined, "manual");
+		}
+		if (!hasThinkingEntry) {
+			sessionManager.appendThinkingLevelChange(thinkingLevel, thinkingSelection);
+		}
+	} else {
+		if (model) {
+			sessionManager.appendModelChange(
+				model.provider,
+				model.id,
+				undefined,
+				undefined,
+				undefined,
+				hasExplicitModelSelection ? "manual" : initialModelProvenance === "scoped" ? "scoped" : undefined,
+			);
+		}
+		sessionManager.appendThinkingLevelChange(thinkingLevel, thinkingSelection);
 	}
 	sessionRef.current = session;
 	const extensionsResult = resourceLoader.getExtensions();
