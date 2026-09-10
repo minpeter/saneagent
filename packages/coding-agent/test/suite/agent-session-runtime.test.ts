@@ -337,10 +337,17 @@ describe("AgentSessionRuntime characterization", () => {
 	});
 
 	it("reports why an unflushed session cannot be forked", async () => {
-		const { runtime } = await createRuntimeForTest(() => {});
+		// An explicit launch model is durable manual intent and flushes the session file at
+		// creation, so the unflushed case can only be built from an implicit startup pick.
+		const { runtime } = await createRuntimeForTest(() => {}, { bootstrapModel: false });
 		const sessionFile = runtime.session.sessionFile;
 		const leafId = runtime.session.sessionManager.getLeafId();
 		expect(sessionFile).toBeDefined();
+		expect(
+			runtime.session.sessionManager
+				.getEntries()
+				.some((entry) => entry.type === "model_change" && entry.selectionIntent === "manual"),
+		).toBe(false);
 		expect(existsSync(sessionFile!)).toBe(false);
 		expect(leafId).toBeTruthy();
 
