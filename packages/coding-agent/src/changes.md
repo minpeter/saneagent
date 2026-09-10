@@ -1,5 +1,23 @@
 # changes
 
+## 2026-09-09 - Forward the initial model provenance from the CLI to the session
+
+### What changed
+
+- `packages/coding-agent/src/main.ts`: the `createAgentSessionFromServices` call site forwards `sessionOptions.initialModelProvenance` alongside the initial `model`, so the provenance the CLI already computed for a startup pick reaches the SDK instead of arriving as `undefined`.
+
+### Why
+
+- `packages/coding-agent/src/main.ts`: real-CLI QA showed every CLI launch reaching the SDK with provenance `undefined`, because the services adapter call site never passed the value. A `--models` narrowing default was therefore recorded as durable manual intent and locked a configured declaration out of every later resume; the scoped-intent rule was unreachable through the only surface that sets the option.
+
+### Why an extension could not handle it
+
+- `packages/coding-agent/src/main.ts`: the CLI builds the session before any extension is bound, so the initial-model provenance argument is fixed below every extension hook.
+
+### Expected merge conflict zones
+
+- LOW: `packages/coding-agent/src/main.ts` - the `createAgentSessionFromServices` argument object in `main()`.
+
 ## 2026-09-09 - Export configured-model public contracts
 
 ### What changed

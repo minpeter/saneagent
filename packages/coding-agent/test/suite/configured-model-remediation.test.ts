@@ -2,6 +2,7 @@ import { stripVTControlCharacters } from "node:util";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../../src/core/agent-session.ts";
+import { createAgentSessionFromServices } from "../../src/core/agent-session-services.ts";
 import { ModelUsabilityBudgetError } from "../../src/core/extensions/builtin/compaction/model-usability-budget.ts";
 import { FooterDataProvider } from "../../src/core/footer-data-provider.ts";
 import { canonicalizeFallbackChains } from "../../src/core/retry-fallback/chains.ts";
@@ -187,6 +188,55 @@ describe("configured model independent review regressions", () => {
 		},
 	);
 
+	// "Identical" is the whole selector, tuning included. A same-model declaration carrying a
+	// different thinking level is a real change and must apply, clearing the fallback window -
+	// otherwise the refresh short-circuit would silently swallow a retune.
+	it("a differing declared thinking level is not an identical-selector refresh", async () => {
+		const h = await setup({ settings: { retry: { maxRetries: 0, baseDelayMs: 0 } } });
+		await h.session.setModelPolicy(policy);
+		await h.session.followConfiguredModel();
+		h.setResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "unauthorized" }),
+			fauxAssistantMessage("ok"),
+		]);
+		await h.session.prompt("local fallback");
+		const retry = Reflect.get(h.session, "_retryFallback") as RetryFallbackController;
+		expect(h.session.model?.id).toBe("fallback");
+		expect(retry.activeState).toBeDefined();
+		await h.session.setModelPolicy({
+			models: [{ model: "faux/primary", thinkingLevel: "low" }, { model: "faux/fallback" }],
+		});
+		expect(h.session.model?.id).toBe("primary");
+		expect(h.session.thinkingLevel).toBe("low");
+		expect(h.session.modelSelectSource).toBe("configured");
+		expect(retry.activeState).toBeUndefined();
+	});
+
+	// A manual override owns the slot. Re-declaring the same selectors is a refresh, not a
+	// selection, so it must not quietly pull the user back onto the declared model.
+	it("an identical-selector refresh does not reclaim the slot from a manual override", async () => {
+		const h = await setup({ settings: { retry: { maxRetries: 0, baseDelayMs: 0 } } });
+		await h.session.setModelPolicy(policy);
+		await h.session.setSessionModel(h.models[2]!);
+		const before = {
+			model: h.session.model?.id,
+			owned: h.session.isConfiguredModelOwned,
+			source: h.session.modelSelectSource,
+			history: h.sessionManager.getEntries(),
+			changes: h.eventsOfType("model_changed").length,
+		};
+		await h.session.setModelPolicy(policy);
+		expect({
+			model: h.session.model?.id,
+			owned: h.session.isConfiguredModelOwned,
+			source: h.session.modelSelectSource,
+			history: h.sessionManager.getEntries(),
+			changes: h.eventsOfType("model_changed").length,
+		}).toEqual(before);
+		expect(before.model).toBe("outside");
+		expect(before.owned).toBe(false);
+	});
+
 	it.each(["setModel", "setSessionModel"] as const)(
 		"extension %s forwards deliberate intent through loader/runtime",
 		async (method) => {
@@ -241,10 +291,12 @@ describe("configured model independent review regressions", () => {
 		h: Harness,
 		options: {
 			explicit?: boolean;
-			configured?: boolean;
+			configured?: boolean | string;
 			manager?: SessionManager;
 			defaultId?: string;
-			enabled?: boolean;
+			enabled?: boolean | string[];
+			/** Explicit SDK/CLI narrowing, as `--models` produces it. */
+			scope?: string[];
 		} = {},
 	) {
 		let starts = 0;
@@ -255,7 +307,12 @@ describe("configured model independent review regressions", () => {
 						starts++;
 						if (options.configured !== false)
 							await ctx.sessionSettings.setModelPolicy?.({
-								models: [{ model: "faux/viable", thinkingLevel: "high" }],
+								models: [
+									{
+										model: typeof options.configured === "string" ? options.configured : "faux/viable",
+										thinkingLevel: "high",
+									},
+								],
 							});
 					}),
 			],
@@ -264,7 +321,11 @@ describe("configured model independent review regressions", () => {
 		const settings = SettingsManager.inMemory({
 			defaultProvider: "faux",
 			defaultModel: options.defaultId ?? "tiny",
-			...(options.enabled ? { enabledModels: ["faux/tiny", "faux/viable"] } : {}),
+			...(Array.isArray(options.enabled)
+				? { enabledModels: options.enabled }
+				: options.enabled
+					? { enabledModels: ["faux/tiny", "faux/viable"] }
+					: {}),
 		});
 		const result = await createAgentSession({
 			cwd: h.tempDir,
@@ -274,6 +335,15 @@ describe("configured model independent review regressions", () => {
 			settingsManager: settings,
 			sessionManager: options.manager ?? SessionManager.inMemory(h.tempDir),
 			resourceLoader: createTestResourceLoader({ extensionsResult }),
+			...(options.scope
+				? {
+						scopedModels: options.scope.map((id) => {
+							const model = h.getModel(id);
+							if (!model) throw new Error(`Missing scoped fixture ${id}`);
+							return { model };
+						}),
+					}
+				: {}),
 			...(options.explicit ? { model: h.models[0] } : {}),
 		});
 		sessions.push(result.session);
@@ -351,4 +421,193 @@ describe("configured model independent review regressions", () => {
 		expect(session.model?.id).toBe("viable");
 		expect(session.isConfiguredModelOwned).toBe(false);
 	});
+	// The saved default only wins while it stays inside the narrowed scope. Out of scope it must
+	// yield to scope order rather than resurrect a model the narrowing just excluded.
+	it("settings narrowing falls back to scope order when the saved default is out of scope", async () => {
+		const h = await setup({ models: startupModels });
+		const { session } = await launch(h, {
+			configured: false,
+			defaultId: "tiny",
+			enabled: ["faux/viable"],
+		});
+		await session.bindExtensions({ shutdownHandler() {} });
+		expect(session.model?.id).toBe("viable");
+		expect(session.isConfiguredModelOwned).toBe(false);
+	});
+	// A declaration relaxes admission ordering, not the budget itself: naming a model that cannot
+	// admit the session must still reject rather than start an unusable session.
+	it("a declared primary that is itself unusable still rejects at binding", async () => {
+		const h = await setup({ models: startupModels });
+		const { session } = await launch(h, { configured: "faux/tiny" });
+		await expect(session.bindExtensions({ shutdownHandler() {} })).rejects.toBeInstanceOf(ModelUsabilityBudgetError);
+	});
+	// A declared thinking level is session-scoped: it clamps to what the model supports and stays
+	// ephemeral, so it never persists as a durable user selection.
+	it.each([
+		["non-reasoning", false, "off"],
+		["reasoning", true, "high"],
+	] as const)(
+		"a declared thinking level clamps on a %s model without durable provenance",
+		async (_l, reasoning, expected) => {
+			const h = await setup({
+				models: [{ id: "tiny" }, { id: "viable", reasoning, contextWindow: 100000, maxTokens: 4000 }],
+			});
+			const { session, settings } = await launch(h);
+			await session.bindExtensions({ shutdownHandler() {} });
+			expect(session.model?.id).toBe("viable");
+			expect(session.thinkingLevel).toBe(expected);
+			expect(session.thinkingSelection).toBeUndefined();
+			expect(settings.getDefaultThinkingLevel()).toBeUndefined();
+		},
+	);
+
+	// A resumed session whose last selection was configured is still the declaration's to make.
+	// Admitting the restored model eagerly rejected the launch before session_start could hand
+	// the slot to a viable declared model, so a catalog shrink locked the user out of the session.
+	it("a resumed configured session admits the declared primary instead of the unusable restored model", async () => {
+		const h = await setup({ models: startupModels });
+		const manager = SessionManager.inMemory(h.tempDir);
+		manager.appendModelChange("faux", "tiny", undefined, undefined, undefined, "configured");
+		manager.appendMessage({ role: "user", content: "earlier turn", timestamp: 1 });
+		const { session } = await launch(h, { manager });
+		await session.bindExtensions({ shutdownHandler() {} });
+		expect(session.model?.id).toBe("viable");
+		expect(session.isConfiguredModelOwned).toBe(true);
+	});
+
+	// Deferral relaxes ordering, not the budget: with nothing viable declared the resumed
+	// session must still reject rather than run on a model that cannot hold its transcript.
+	it("a resumed configured session with no viable declaration still rejects", async () => {
+		const h = await setup({ models: startupModels });
+		const manager = SessionManager.inMemory(h.tempDir);
+		manager.appendModelChange("faux", "tiny", undefined, undefined, undefined, "configured");
+		manager.appendMessage({ role: "user", content: "earlier turn", timestamp: 1 });
+		const { session } = await launch(h, { manager, configured: false });
+		await expect(session.bindExtensions({ shutdownHandler() {} })).rejects.toBeInstanceOf(ModelUsabilityBudgetError);
+	});
+
+	// Narrowing chooses which models are reachable, not which one starts. The CLI already
+	// preferred a saved default that survived `--models`; a direct SDK scope took scope order
+	// instead, so the same configuration started on different models through the two surfaces.
+	it("an explicit SDK scope retains a saved default that is not the first scoped model", async () => {
+		const h = await setup({ models: [{ id: "tiny" }, { id: "viable" }] });
+		const { session } = await launch(h, { configured: false, defaultId: "viable", scope: ["tiny", "viable"] });
+		await session.bindExtensions({ shutdownHandler() {} });
+		expect(session.model?.id).toBe("viable");
+		expect(session.isConfiguredModelOwned).toBe(false);
+	});
+
+	// A scope-derived startup pick is a narrowing default, not a chosen model. Recording it as
+	// durable manual intent disarmed the declaration in every later resume, long after the
+	// narrowing flag was gone.
+	it("a scoped startup selection is not durable manual intent", async () => {
+		const h = await setup({ models: [{ id: "tiny" }, { id: "viable" }] });
+		const manager = SessionManager.inMemory(h.tempDir);
+		const scoped = h.getModel("tiny");
+		if (!scoped) throw new Error("Missing scoped fixture");
+		const extensionsResult = await createTestExtensionsResult([], h.tempDir);
+		const { session } = await createAgentSession({
+			cwd: h.tempDir,
+			agentDir: h.tempDir,
+			modelRuntime: h.session.modelRuntime,
+			authStorage: h.authStorage,
+			settingsManager: SettingsManager.inMemory({ defaultProvider: "faux", defaultModel: "tiny" }),
+			sessionManager: manager,
+			resourceLoader: createTestResourceLoader({ extensionsResult }),
+			model: scoped,
+			initialModelProvenance: "scoped",
+			scopedModels: [{ model: scoped }],
+		});
+		sessions.push(session);
+		const startupEntry = manager.getBranch().findLast((entry) => entry.type === "model_change");
+		expect(
+			startupEntry?.type === "model_change" ? [startupEntry.modelId, startupEntry.selectionIntent] : undefined,
+		).toEqual(["tiny", undefined]);
+		// Reopening without the narrowing hands the slot back to a declaration.
+		const reopened = await launch(h, { manager });
+		await reopened.session.bindExtensions({ shutdownHandler() {} });
+		expect(reopened.session.model?.id).toBe("viable");
+		expect(reopened.session.isConfiguredModelOwned).toBe(true);
+	});
+
+	// Real-CLI QA caught this: `main.ts` computed `initialModelProvenance` but the services
+	// adapter dropped it, so every CLI launch reached the SDK with provenance undefined and a
+	// `--models` narrowing default was still written as durable manual intent. The scoped-intent
+	// rule is only observable end to end if this option survives the adapter.
+	it("forwards initialModelProvenance through the services adapter", async () => {
+		const h = await setup({ models: [{ id: "tiny" }, { id: "viable" }] });
+		const manager = SessionManager.inMemory(h.tempDir);
+		const scoped = h.getModel("tiny");
+		if (!scoped) throw new Error("Missing scoped fixture");
+		const settingsManager = SettingsManager.inMemory({ defaultProvider: "faux", defaultModel: "tiny" });
+		const resourceLoader = createTestResourceLoader({
+			extensionsResult: await createTestExtensionsResult([], h.tempDir),
+		});
+		const { session } = await createAgentSessionFromServices({
+			services: {
+				cwd: h.tempDir,
+				agentDir: h.tempDir,
+				modelRuntime: h.session.modelRuntime,
+				modelRegistry: h.session.modelRegistry,
+				authStorage: h.authStorage,
+				settingsManager,
+				resourceLoader,
+			} as Parameters<typeof createAgentSessionFromServices>[0]["services"],
+			sessionManager: manager,
+			model: scoped,
+			initialModelProvenance: "scoped",
+			scopedModels: [{ model: scoped }],
+		});
+		sessions.push(session);
+		const entry = manager.getBranch().findLast((candidate) => candidate.type === "model_change");
+		expect(entry?.type === "model_change" ? [entry.modelId, entry.selectionIntent] : undefined).toEqual([
+			"tiny",
+			undefined,
+		]);
+	});
+
+	// An identical-selector re-declaration rebinds the active model to the refreshed catalog
+	// object. When that object no longer supports the level the session is running, the level
+	// has to come down with it - including when a fallback, not the primary, is active.
+	it.each(["primary", "fallback"] as const)(
+		"an identical-selector refresh clamps the thinking level of the active %s model",
+		async (active) => {
+			const h = await setup({ settings: { retry: { maxRetries: 0, baseDelayMs: 0 } } });
+			const declaration: SessionModelPolicy = {
+				models: [
+					{ model: "faux/primary", thinkingLevel: "high" },
+					{ model: "faux/fallback", thinkingLevel: "high" },
+				],
+			};
+			await h.session.setModelPolicy(declaration);
+			await h.session.followConfiguredModel();
+			if (active === "fallback") {
+				h.setResponses([
+					fauxAssistantMessage("", { stopReason: "error", errorMessage: "unauthorized" }),
+					fauxAssistantMessage("ok"),
+				]);
+				await h.session.prompt("drive a fallback");
+			}
+			expect(h.session.model?.id).toBe(active);
+			expect(h.session.thinkingLevel).toBe("high");
+			const levels = h.eventsOfType("thinking_level_changed").length;
+			h.session.modelRuntime.registerProvider("faux", {
+				baseUrl: h.models[0].baseUrl,
+				apiKey: "faux-key",
+				api: h.models[0].api,
+				models: h.models.map((model) => ({ ...model, reasoning: model.id !== active })),
+			});
+			await h.session.setModelPolicy(declaration);
+			expect(h.session.model?.id).toBe(active);
+			expect(h.session.model?.reasoning).toBe(false);
+			expect(h.session.thinkingLevel).toBe("off");
+			expect(
+				h
+					.eventsOfType("thinking_level_changed")
+					.map((event) => event.level)
+					.slice(levels),
+			).toEqual(["off"]);
+			expect(h.settingsManager.getDefaultThinkingLevel()).toBeUndefined();
+		},
+	);
 });

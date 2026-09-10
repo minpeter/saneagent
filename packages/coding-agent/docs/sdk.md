@@ -413,8 +413,9 @@ const { session } = await createAgentSession({
 
 If no model is provided:
 1. Tries to restore from session (if continuing)
-2. Uses default from settings
-3. Falls back to first available model
+2. Uses `scopedModels` (or `enabledModels` narrowing), preferring the saved settings default when it is still in scope, otherwise the first scoped model
+3. Uses default from settings
+4. Falls back to first available model
 
 Remote catalogs are persisted locally so later runtimes can restore them without a network request. The default file is `~/.pi/agent/models-store.json`; set `modelsStorePath` to choose another location, or inject `modelsStore` to control persistence. Network refreshes are throttled to once per provider every four hours unless forced. To force an immediate refresh, call `await modelRuntime.refresh({ allowNetwork: true, force: true, signal })`. Setting `PI_OFFLINE` disables model network access.
 

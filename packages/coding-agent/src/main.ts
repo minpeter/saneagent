@@ -1073,6 +1073,7 @@ export async function main(args: string[], options?: MainOptions) {
 			sessionManager,
 			sessionStartEvent,
 			model: sessionOptions.model,
+			initialModelProvenance: sessionOptions.initialModelProvenance,
 			thinkingLevel: sessionOptions.thinkingLevel,
 			thinkingSelection: sessionOptions.thinkingSelection,
 			scopedModels: sessionOptions.scopedModels,

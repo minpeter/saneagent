@@ -222,7 +222,7 @@ Records an accepted model selection, including startup and configured selection.
 {"type":"model_change","id":"d4e5f6g7","parentId":"c3d4e5f6","timestamp":"2024-12-03T14:05:00.000Z","provider":"openai","modelId":"gpt-4o","selectionIntent":"manual"}
 ```
 
-Optional `selectionIntent` is `"configured"`, `"manual"`, or `"programmatic"`. Configured intent allows a declaration to select again after restart; manual intent preserves a deliberate override, including an explicit launch before the first message. Programmatic selections do not transfer ownership. Legacy history without intent retains its override semantics. Transient fallback entries use `reason: "fallback"` or `"fallback-revert"` and do not replace the last owning selection. Rejected or stale admissions append no model selection.
+Optional `selectionIntent` is `"configured"`, `"manual"`, or `"programmatic"`. Configured intent allows a declaration to select again after restart; manual intent preserves a deliberate override, including an explicit launch before the first message. A startup pick derived from model narrowing (`--models`, `scopedModels`) records no intent, because narrowing selects which models are reachable in one launch rather than which model the user chose. Programmatic selections do not transfer ownership. Legacy history without intent retains its override semantics. Transient fallback entries use `reason: "fallback"` or `"fallback-revert"` and do not replace the last owning selection. Rejected or stale admissions append no model selection.
 
 ### ThinkingLevelChangeEntry
 

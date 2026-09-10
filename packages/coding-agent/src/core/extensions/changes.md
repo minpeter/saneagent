@@ -2052,23 +2052,25 @@ Extension APIs now expose `pi.rpc.emit(name, data)`. It validates a non-empty na
 opaque payload on the generation-owned extension bus; it does not write to a transport directly.
 Keep ordinary `pi.events` extension-local, and keep RPC delivery opt-in at the connection boundary.
 
-## MAIN model policy ownership and provenance (2026-09-08)
+## MAIN configured model ownership and provenance (2026-09-08)
 
-`ExtensionSessionSettings` gains `followModelPolicy()`: hand the MAIN slot back to the declared
-policy and apply it now. It rejects when no policy is configured or none of its models has
-configured auth, leaving the active model untouched. It exists because `setModelPolicy` early-returns
-on identical selectors, which is exactly the case when a user wants the chain they already declared.
+`ExtensionSessionSettings` gains `followConfiguredModel()`: hand the MAIN slot back to the
+declared chain and apply it now. It rejects when no chain is configured or none of its models has
+configured auth, leaving the active model untouched. It exists because `setModelPolicy`
+early-returns on identical selectors, which is exactly the case when a user wants the chain they
+already declared.
 
-`ModelSelectSource` gains `policy`, emitted whenever a declared policy selects the model - startup,
-a changed chain, or a return. Both paths previously reused `restore`, which means session-history
-restore, so a consumer showing where the current model came from could not distinguish a configured
-chain from a resumed conversation. Consumers that switch on this union must handle the new value;
-`restore` now means history restore only.
+`ModelSelectSource` gains `configured`, emitted whenever a declared chain selects the model -
+startup, a changed chain, or a return. Both paths previously reused `restore`, which means
+session-history restore, so a consumer showing where the current model came from could not
+distinguish a configured chain from a resumed conversation. Consumers that switch on this union
+must handle the new value; `restore` now means history restore only.
 
 Ownership is also no longer transferred by machine events. `setModel`/`setSessionModel` take
 `{ deliberate }`, and the extension surface (`pi.setModel`, `pi.setSessionModel`) passes
-`deliberate: false` - a builtin swapping models programmatically no longer leaves the declared chain
-inert for the session. An active fallback window no longer disarms policy selection either.
+`deliberate: false` - a builtin swapping models programmatically no longer leaves the declared
+chain inert for the session. An active fallback window no longer disarms configured selection
+either.
 
 ### Files modified
 

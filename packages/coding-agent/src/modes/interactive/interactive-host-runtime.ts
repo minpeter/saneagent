@@ -799,12 +799,32 @@ export function createRemoteSessionProxy(
 		);
 		return next;
 	};
+	// The configured-model declaration is owned by the authoritative host. A shared-host
+	// client mirrors it and must never hold a divergent copy, so every route to it is
+	// closed here: reads report "absent", the actions reject, and a direct write or delete
+	// throws instead of falling through to the local target - `get` cannot observe those.
+	const CONFIGURED_MODEL_SURFACE: ReadonlySet<string | symbol> = new Set([
+		"hasConfiguredModel",
+		"isConfiguredModelOwned",
+		"followConfiguredModel",
+		"setModelPolicy",
+	]);
+	const configuredModelUnavailable = () =>
+		new Error("Configured model policy actions are unavailable in shared-host clients");
 	const session = new Proxy(local, {
+		set(target, property, value, receiver) {
+			if (CONFIGURED_MODEL_SURFACE.has(property)) throw configuredModelUnavailable();
+			return Reflect.set(target, property, value, receiver);
+		},
+		deleteProperty(target, property) {
+			if (CONFIGURED_MODEL_SURFACE.has(property)) throw configuredModelUnavailable();
+			return Reflect.deleteProperty(target, property);
+		},
 		get(target, property, receiver) {
 			if (property === "hasConfiguredModel" || property === "isConfiguredModelOwned") return false;
 			if (property === "followConfiguredModel" || property === "setModelPolicy") {
 				return async () => {
-					throw new Error("Configured model policy actions are unavailable in shared-host clients");
+					throw configuredModelUnavailable();
 				};
 			}
 			if (property === "prompt")

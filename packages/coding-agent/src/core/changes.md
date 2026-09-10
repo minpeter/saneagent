@@ -1,3 +1,28 @@
+## 2026-09-09 - Close the remaining startup and session-boundary gaps in configured selection
+
+### What changed
+
+- `packages/coding-agent/src/core/sdk.ts`: deferred initial admission carries its mode, so a resumed session whose last selection was `configured` is admitted after extension binding against its restored transcript instead of being rejected on the restored model. Manual intent is persisted only for a genuinely explicit launch model - a startup pick derived from narrowing (`initialModelProvenance: "scoped"`) records no intent. Saved-default preference in scope is unconditional, so an explicit SDK/CLI scope resolves the initial model exactly as settings narrowing does.
+- `packages/coding-agent/src/core/agent-session.ts`: `deferInitialModelAdmission` is a `ModelUsabilityAdmission` mode; `_admitInitialModel` admits `resume` against live context without the speculation lead. An identical-selector refresh that rebinds the active model - primary or active fallback - re-clamps the effective thinking level to the refreshed capabilities, keeping selector provenance and writing no history or default.
+- `packages/coding-agent/src/core/agent-session-services.ts`, `packages/coding-agent/src/main.ts`: `createAgentSessionFromServices` accepts and forwards `initialModelProvenance`, and the CLI passes the value it already computed.
+
+### Why
+
+- `packages/coding-agent/src/core/sdk.ts`: the deferral covered only fresh sessions, so a configured session that resumed onto a model the catalog had since shrunk threw `ModelUsabilityBudgetError` from `createAgentSession`, before the declaration that would have replaced it could run - the resume was unrecoverable without editing settings. Recording a narrowing default as durable manual intent disarmed the declaration in every later resume, long after the narrowing flag was gone. And `preferSavedDefault` was disabled whenever the caller passed `scopedModels`, so the CLI (which prefers a saved default that survived `--models`) and a direct SDK scope started the same configuration on different models.
+- `packages/coding-agent/src/core/agent-session.ts`: the refresh rebinds a model object whose reasoning support may have changed; leaving the level untouched ran the session at a level the refreshed model does not offer, and an active fallback hit it the same way.
+- `packages/coding-agent/src/core/agent-session-services.ts`, `packages/coding-agent/src/main.ts`: real-CLI QA caught the services adapter silently dropping `initialModelProvenance`, so every CLI launch reached the SDK with provenance `undefined`. A `--models` narrowing default was therefore still recorded as durable manual intent and locked a configured declaration out of every later resume - the scoped-intent rule was unreachable through the only surface that sets the option.
+
+### Why an extension could not handle it
+
+- Initial admission, startup intent persistence and default ordering all resolve before extension binding; the refresh clamp is core model/thinking state below extension hooks.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/core/sdk.ts`: `findInitialModel` options, startup history append, `deferInitialModelAdmission` and the eager admission call.
+- `packages/coding-agent/src/core/agent-session.ts`: `_admitInitialModel`, `setModelPolicy`'s unchanged-selector branch and `_clampThinkingLevelToActiveModel`.
+- `packages/coding-agent/src/core/agent-session-services.ts`: `CreateAgentSessionFromServicesOptions` and the `createAgentSession` argument list.
+- `packages/coding-agent/src/main.ts`: the `createAgentSessionFromServices` call site.
+
 ## 2026-09-09 - Complete configured-model selection and transactional admission
 
 ### What changed
@@ -5235,7 +5260,7 @@ unrelated fallback bus, silently disconnecting `pi.rpc.emit` on trust-requiring 
   packages/coding-agent/src/core/agent-session.ts and candidate reservation in
   packages/coding-agent/src/core/retry-fallback/controller.ts.
 
-## MAIN model policy ownership
+## MAIN configured model ownership
 
 A declared session model policy owns the MAIN slot until the USER deliberately takes it. Machine
 events never transfer ownership:
@@ -5244,32 +5269,33 @@ events never transfer ownership:
   surface (`pi.setModel`, `pi.setSessionModel`) passes `deliberate: false`, so a builtin swapping
   models programmatically - a fast-mode toggle to a variant and back, a startup recommendation - no
   longer leaves the configured chain inert for the session.
-- An active fallback window no longer disarms policy selection. It is an execution condition, not a
-  decision. `setModelPolicy` also stops skipping application during a fallback window, because the
-  same call clears that window: skipping stranded the session on a fallback model nobody chose while
-  the newly declared chain never took effect.
-- `followModelPolicy()` hands the slot back and applies the currently loaded policy. It exists
-  because `setModelPolicy` early-returns on identical selectors, which is the normal case when a user
-  wants the chain they already configured. It keeps `persistDefault: false` and rejects - leaving the
-  active model untouched - when no policy is configured or none of its models has configured auth.
-  Exposed to extensions as `sessionSettings.followModelPolicy`.
+- An active fallback window no longer disarms configured selection. It is an execution condition,
+  not a decision. `setModelPolicy` also stops skipping application during a fallback window,
+  because the same call clears that window: skipping stranded the session on a fallback model
+  nobody chose while the newly declared chain never took effect.
+- `followConfiguredModel()` hands the slot back and applies the currently loaded chain. It exists
+  because `setModelPolicy` early-returns on identical selectors, which is the normal case when a
+  user wants the chain they already configured. It keeps `persistDefault: false` and rejects -
+  leaving the active model untouched - when no chain is configured or none of its models has
+  configured auth. Exposed to extensions as `sessionSettings.followConfiguredModel`.
 
 Reload still does NOT re-arm: a config watcher can request reload on its own, so re-arming there
 would let an unrelated resource change silently revoke a deliberate pick.
 
 ### Provenance
 
-`ModelSelectSource` gains `policy`, emitted by both policy paths (startup/changed-chain application
-and `followModelPolicy`). Previously both reused `restore`, which is session-history restore, so a
-consumer showing where the current model came from could not tell a configured chain from a resumed
-conversation. `restore` now means history restore only.
+`ModelSelectSource` gains `configured`, emitted by both configured paths (startup/changed-chain
+application and `followConfiguredModel`). Previously both reused `restore`, which is
+session-history restore, so a consumer showing where the current model came from could not tell a
+configured chain from a resumed conversation. `restore` now means history restore only.
 
 ### Discoverability
 
-`/model policy` hands the slot back. The argument decision lives in `core/model-command-action.ts`
-(`resolveModelCommandAction`) so the routing is testable without a terminal; the interactive mode
-keeps painting and notification. The term matches the whole argument only, so a model named e.g.
-`policy-tuned-v2` stays a model search. With no policy configured the command reports that instead
-of searching for a model called "policy", and a policy whose models all lack auth fails through the
-normal model-switch error path with the active model untouched. `AgentSession.hasModelPolicy`
-exposes the gate the UI needs; the slash-command hint advertises `<provider/model>|policy`.
+`/model configured` hands the slot back. The argument decision lives in
+`core/model-command-action.ts` (`resolveModelCommandAction`) so the routing is testable without a
+terminal; the interactive mode keeps painting and notification. The term matches the whole
+argument only, so a model named e.g. `configured-v2` stays a model search. With no chain
+configured the command reports that instead of searching for a model called "configured", and a
+chain whose models all lack auth fails through the normal model-switch error path with the active
+model untouched. `AgentSession.hasConfiguredModel` exposes the gate the UI needs; the
+slash-command hint advertises `<provider/model>|configured`.

@@ -207,6 +207,30 @@ describe("interactive host runtime", () => {
 				expect.soft(await client.getState()).toEqual(hostState);
 				expect.soft(await client.getEntries()).toEqual(hostEntries);
 				expect(rejected).toBe(true);
+				// The read trap cannot see a direct property write or delete: both bypass `get`
+				// entirely and land on the local target, so a caller could install or erase a
+				// configured declaration on the mirror that the authoritative host never saw.
+				const configuredSurface = [
+					"setModelPolicy",
+					"followConfiguredModel",
+					"hasConfiguredModel",
+					"isConfiguredModelOwned",
+				] as const;
+				for (const property of configuredSurface) {
+					expect(() => {
+						(session as unknown as Record<string, unknown>)[property] = removal ? undefined : declaration;
+					}).toThrow();
+					expect(() => {
+						delete (session as unknown as Record<string, unknown>)[property];
+					}).toThrow();
+				}
+				expect.soft(snapshot()).toEqual(localBefore);
+				expect.soft(await client.getState()).toEqual(hostState);
+				expect.soft(await client.getEntries()).toEqual(hostEntries);
+				// Reads stay closed after the rejected writes.
+				expect(session.hasConfiguredModel).toBe(false);
+				expect(session.isConfiguredModelOwned).toBe(false);
+				await expect(session.followConfiguredModel()).rejects.toThrow();
 			} finally {
 				await client.stop();
 				h.cleanup();

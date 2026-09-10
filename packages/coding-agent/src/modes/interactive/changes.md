@@ -2,11 +2,11 @@
 
 ### What changed
 
-- `packages/coding-agent/src/modes/interactive/interactive-host-runtime.ts`: entry notifications and authoritative refresh backfills append to the local mirror with persistence disabled. Shared-host clients suppress configured ownership/actions and reject both `setModelPolicy(policy)` and `setModelPolicy(undefined)` at the proxy boundary, leaving the local mirror and authoritative host unchanged.
+- `packages/coding-agent/src/modes/interactive/interactive-host-runtime.ts`: entry notifications and authoritative refresh backfills append to the local mirror with persistence disabled. Shared-host clients suppress configured ownership/actions and reject both `setModelPolicy(policy)` and `setModelPolicy(undefined)` at the proxy boundary, leaving the local mirror and authoritative host unchanged. The whole configured surface (`hasConfiguredModel`, `isConfiguredModelOwned`, `followConfiguredModel`, `setModelPolicy`) is also closed to direct property writes and deletes, which bypass the `get` trap entirely and would otherwise land on the local target.
 
 ### Why
 
-- `packages/coding-agent/src/modes/interactive/interactive-host-runtime.ts`: the host already owns the shared JSONL. Re-persisting notifications duplicated setup-state and session_info entries after manual startup selection made the file durable before the first assistant response. The declaration setter previously fell through to the local mirror and silently accepted assignment/removal that the host never received.
+- `packages/coding-agent/src/modes/interactive/interactive-host-runtime.ts`: the host already owns the shared JSONL. Re-persisting notifications duplicated setup-state and session_info entries after manual startup selection made the file durable before the first assistant response. The declaration setter previously fell through to the local mirror and silently accepted assignment/removal that the host never received. Intercepting reads alone left the same hole open one level down: `session.setModelPolicy = ...` and `delete session.hasConfiguredModel` never consult `get`, so a client could still install or erase a declaration the authoritative host never saw.
 
 ### Why an extension could not handle it
 
@@ -14,7 +14,7 @@
 
 ### Expected merge conflict zones
 
-- `packages/coding-agent/src/modes/interactive/interactive-host-runtime.ts`: `entry_appended` handling, `performRefresh` backfill, and configured API interception in the session proxy's `get` trap.
+- `packages/coding-agent/src/modes/interactive/interactive-host-runtime.ts`: `entry_appended` handling, `performRefresh` backfill, and configured API interception in the session proxy's `get`, `set`, and `deleteProperty` traps.
 
 ## 2026-09-08 - Recommend configured policy in model autocomplete
 

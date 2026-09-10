@@ -305,7 +305,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	if (!model) {
 		const result = await findInitialModel({
 			scopedModels,
-			preferSavedDefault: options.scopedModels === undefined,
+			// Narrowing selects which models are reachable, not which one starts. A saved
+			// default that survived the narrowing is still the user's pick, whether the
+			// scope came from settings or from an explicit SDK/CLI list.
+			preferSavedDefault: true,
 			isContinuing: hasExistingSession,
 			defaultProvider: settingsManager.getDefaultProvider(),
 			defaultModelId: settingsManager.getDefaultModel(),
@@ -507,11 +510,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// from initialState; assign the separately computed provenance explicitly.
 	agent.state.thinkingSelection = thinkingSelection;
 
+	// A scope-derived startup pick is a narrowing default, not a model the user chose:
+	// recording it as durable manual intent would disarm a configured declaration in every
+	// later resume of the session, long after the narrowing flag is gone.
+	const hasExplicitModelSelection = options.model !== undefined && initialModelProvenance !== "scoped";
+
 	// Preserve durable manual intent even before the first conversation message.
 	if (hasExistingSession || hasPersistedManualSelection) {
 		agent.state.messages = existingSession.messages;
 		// An explicit launch selection also replaces any previously recorded policy intent.
-		if (options.model && model) {
+		if (hasExplicitModelSelection && model) {
 			sessionManager.appendModelChange(model.provider, model.id, undefined, undefined, undefined, "manual");
 		}
 		if (!hasThinkingEntry) {
@@ -526,7 +534,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				undefined,
 				undefined,
 				undefined,
-				options.model ? "manual" : undefined,
+				hasExplicitModelSelection ? "manual" : undefined,
 			);
 		}
 		sessionManager.appendThinkingLevelChange(thinkingLevel, thinkingSelection);
@@ -545,7 +553,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		!hasPersistedManualSelection &&
 		initialModelProvenance !== "cli" &&
 		initialModelProvenance !== "scoped";
-	const deferInitialModelAdmission = modelPolicySelectionAllowed && !hasExistingSession;
+	// A session the declaration may still select for must not be rejected on the model the
+	// SDK resolved before extensions bind: the declaration gets to replace an unusable
+	// implicit default first, and whatever survives that is admitted at the first prompt.
+	const deferInitialModelAdmission = modelPolicySelectionAllowed
+		? hasExistingSession
+			? ("resume" as const)
+			: ("start" as const)
+		: undefined;
 	const session = new AgentSession({
 		agent,
 		sessionManager,
@@ -560,7 +575,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		modelRegistry,
 		initialActiveToolNames,
 		modelPolicySelectionAllowed,
-		deferInitialModelAdmission,
+		...(deferInitialModelAdmission ? { deferInitialModelAdmission } : {}),
 		defaultToolNames: sessionDefaultToolNames,
 		allowedToolNames,
 		excludedToolNames,
@@ -571,7 +586,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const liveContextTokens = hasExistingSession
 		? existingSession.messages.reduce((total, message) => total + estimateTokens(message), 0)
 		: 0;
-	if (!deferInitialModelAdmission) {
+	if (deferInitialModelAdmission === undefined) {
 		session.assertModelUsable(
 			undefined,
 			liveContextTokens,

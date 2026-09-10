@@ -628,8 +628,11 @@ export interface AgentSessionConfig {
 	sessionStartEvent?: SessionStartEvent;
 	/** Only SDK-resolved defaults of new sessions may be replaced by an extension model policy. */
 	modelPolicySelectionAllowed?: boolean;
-	/** Admit an implicit fresh-session default after extensions can supply configured selection. */
-	deferInitialModelAdmission?: boolean;
+	/**
+	 * Admit the SDK-resolved default after extensions can supply configured selection, using
+	 * this admission mode. A resumed session is admitted against its restored transcript.
+	 */
+	deferInitialModelAdmission?: ModelUsabilityAdmission;
 	autoTitleSessions?: boolean;
 }
 
@@ -1206,7 +1209,7 @@ export class AgentSession {
 	private _modelPolicy: ReturnType<typeof resolveSessionModelPolicy> | undefined;
 	private _modelPolicyRevision = 0;
 	private _modelPolicySelectionAllowed: boolean;
-	private _initialModelAdmissionPending: boolean;
+	private _initialModelAdmission: ModelUsabilityAdmission | undefined;
 	private _modelSelectSource: ModelSelectSource | undefined;
 	private _pendingModelTransition: ModelTransition | undefined;
 	private readonly _modelTransitionContext = new AsyncLocalStorage<ModelTransition>();
@@ -1247,7 +1250,7 @@ export class AgentSession {
 		this.sessionManager = config.sessionManager;
 		this.settingsManager = config.settingsManager;
 		this._modelPolicySelectionAllowed = config.modelPolicySelectionAllowed ?? false;
-		this._initialModelAdmissionPending = config.deferInitialModelAdmission ?? false;
+		this._initialModelAdmission = config.deferInitialModelAdmission;
 		this._unsubscribeSettingsSource = this.settingsManager.subscribeToSourceSelection((source) => {
 			this._emit({ type: "settings_source_selected", ...source });
 		});
@@ -4839,9 +4842,16 @@ export class AgentSession {
 	}
 
 	private _admitInitialModel(): void {
-		if (!this._initialModelAdmissionPending) return;
-		this.assertModelUsable(undefined, 0, { admission: "start" });
-		this._initialModelAdmissionPending = false;
+		const admission = this._initialModelAdmission;
+		if (!admission) return;
+		// A resumed session carries its restored transcript into the budget, exactly as the
+		// eager check at session creation would have, minus the speculation lead.
+		const liveContextTokens = admission === "resume" ? (this.getContextUsage()?.tokens ?? 0) : 0;
+		this.assertModelUsable(undefined, liveContextTokens, {
+			admission,
+			includeSpeculationLead: admission !== "resume",
+		});
+		this._initialModelAdmission = undefined;
 	}
 
 	getRetryFallbackSettings() {
@@ -4856,17 +4866,32 @@ export class AgentSession {
 		// A thinking-qualified key resolves before a base key in the controller. Expand
 		// bare settings keys first, then overlay matching canonical keys without changing
 		// other providers or treating colons belonging to an exact model ID as tuning.
+		const canonicalSettingsChains = canonicalizeFallbackChains(settings.chains, this._modelRegistry);
 		const overlayKeys = new Set(keys);
-		for (const key of Object.keys(canonicalizeFallbackChains(settings.chains, this._modelRegistry))) {
+		for (const key of Object.keys(canonicalSettingsChains)) {
 			const selector = parseFallbackSelector(key, this._modelRegistry);
 			if (selector && keys.includes(`${selector.provider}/${selector.id}`)) overlayKeys.add(key);
 		}
+		// The declaration always owns its own keys, so a declared model keeps `hasConfiguredChain()`
+		// true and the server-side-fallback abort armed. But a declaration that names no model other
+		// than this key's own - a one-model declaration, or several tunings of one model - supplies no
+		// escape lane, and replacing wholesale then deleted the chain the user configured for that
+		// same model, leaving an inert self-only lane that could never fire. In that case the
+		// declaration's ordering still leads and the user's configured entries follow it.
+		const overlayFor = (key: string): string[] => {
+			const selector = parseFallbackSelector(key, this._modelRegistry);
+			const base = selector ? `${selector.provider}/${selector.id}` : key;
+			if (keys.some((declared) => declared !== base)) return [...policy.selectors];
+			const configured = canonicalSettingsChains[key] ?? [];
+			const declared = new Set(policy.selectors.map((entry) => entry.toLowerCase()));
+			return [...policy.selectors, ...configured.filter((entry) => !declared.has(entry.toLowerCase()))];
+		};
 		return {
 			...settings,
 			modelFallback,
 			chains: {
 				...settings.chains,
-				...Object.fromEntries([...overlayKeys].map((key) => [key, [...policy.selectors]])),
+				...Object.fromEntries([...overlayKeys].map((key) => [key, overlayFor(key)])),
 			},
 		};
 	}
@@ -4899,6 +4924,7 @@ export class AgentSession {
 				if (refreshed && refreshed !== current) {
 					this.assertModelUsable(refreshed, this._getDownswitchLiveContextTokens(refreshed));
 					this.agent.state.model = refreshed;
+					this._clampThinkingLevelToActiveModel();
 				}
 				commitPolicy();
 				return;
@@ -5171,6 +5197,26 @@ export class AgentSession {
 				throw error;
 			}
 		});
+	}
+
+	/**
+	 * Re-clamp the effective thinking level to the active model's capabilities.
+	 *
+	 * A catalog refresh can hand back the same selector with different reasoning support - the
+	 * primary or, after a fallback, whichever model is currently active. The rebinding itself is
+	 * not a selection, so this keeps the selector's provenance and writes no history or default;
+	 * it only stops the session from running a level the refreshed model does not offer.
+	 */
+	private _clampThinkingLevelToActiveModel(): void {
+		const model = this.model;
+		if (!model) return;
+		const previousLevel = this.agent.state.thinkingLevel;
+		const level = this._clampThinkingLevel(previousLevel, getSupportedThinkingLevels(model) as ThinkingLevel[]);
+		if (level === previousLevel) return;
+		this.agent.state.thinkingLevel = level;
+		const selection = this.agent.state.thinkingSelection;
+		if (selection) this.agent.state.thinkingSelection = { ...selection, level };
+		this._emit({ type: "thinking_level_changed", level });
 	}
 
 	private _applyEphemeralThinkingLevel(level: ThinkingLevel): void {
